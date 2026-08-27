@@ -42,6 +42,25 @@ impl BitReader {
         Some(value)
     }
 
+    /// Consumes the remainder of the current byte and reports whether every
+    /// discarded fill bit was zero.
+    ///
+    /// If the reader is not byte-aligned, those bits have already been pulled
+    /// into the staging buffer with the current byte, so alignment never needs
+    /// additional input.
+    pub(super) fn align_to_byte_with_zero_fill(&mut self) -> bool {
+        let count = self.buffered % 8;
+        if count == 0 {
+            return true;
+        }
+
+        let mask = (1_u64 << count) - 1;
+        let is_zero = self.buffer & mask == 0;
+        self.buffer >>= count;
+        self.buffered -= count;
+        is_zero
+    }
+
     #[cfg(test)]
     fn buffered_bits(&self) -> u32 {
         self.buffered
@@ -101,5 +120,20 @@ mod tests {
 
         assert_eq!(reader.read_bits(&[0xff], &mut cursor, 0), Some(0));
         assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn byte_alignment_validates_fill_bits() {
+        let mut reader = BitReader::default();
+        let mut cursor = 0;
+
+        assert_eq!(reader.read_bits(&[0b0000_0101], &mut cursor, 3), Some(5));
+        assert!(reader.align_to_byte_with_zero_fill());
+        assert_eq!(reader.buffered_bits(), 0);
+
+        let mut cursor = 0;
+        assert_eq!(reader.read_bits(&[0b1000_0101], &mut cursor, 3), Some(5));
+        assert!(!reader.align_to_byte_with_zero_fill());
+        assert_eq!(reader.buffered_bits(), 0);
     }
 }
