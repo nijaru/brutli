@@ -92,9 +92,8 @@ mod tests {
     use crate::decode::bit_reader::BitReader;
     use crate::decode::prefix_code::PrefixSymbolDecoder;
 
-    const CODE_LENGTH_ORDER: [u8; 18] = [
-        1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    ];
+    const CODE_LENGTH_ORDER: [u8; 18] =
+        [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
     #[derive(Default)]
     struct Bits {
