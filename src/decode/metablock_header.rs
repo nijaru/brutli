@@ -240,9 +240,9 @@ mod tests {
         let mut decoder = MetaBlockHeaderDecoder::default();
         let mut reader = BitReader::default();
         let mut cursor = 0;
-        decoder.decode(&mut reader, bytes, &mut cursor).map(|header| {
-            header.expect("test header should contain enough input")
-        })
+        decoder
+            .decode(&mut reader, bytes, &mut cursor)
+            .map(|header| header.expect("test header should contain enough input"))
     }
 
     #[test]
@@ -368,12 +368,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            header.kind,
-            MetaBlockKind::Compressed {
-                length: 0x1235
-            }
-        );
+        assert_eq!(header.kind, MetaBlockKind::Compressed { length: 0x1235 });
     }
 
     #[test]
