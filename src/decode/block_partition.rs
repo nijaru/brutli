@@ -3,8 +3,8 @@ use super::prefix_code::{PrefixCode, PrefixSymbolDecoder};
 use super::prefix_code_decoder::{PrefixCodeDecoder, PrefixCodeDecoderError};
 
 const BLOCK_LENGTH_OFFSETS: [usize; 26] = [
-    1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305, 369, 497,
-    753, 1265, 2289, 4337, 8433, 16625,
+    1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305, 369, 497, 753, 1265,
+    2289, 4337, 8433, 16625,
 ];
 const BLOCK_LENGTH_EXTRA_BITS: [u8; 26] = [
     2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13, 24,
@@ -55,7 +55,11 @@ impl BlockPartitionDecoder {
         let multiple = num_types > 1;
         Self {
             num_types,
-            state: if multiple { State::TypeCode } else { State::Done },
+            state: if multiple {
+                State::TypeCode
+            } else {
+                State::Done
+            },
             type_decoder: multiple.then(|| PrefixCodeDecoder::new(num_types + 2)),
             length_decoder: multiple.then(|| PrefixCodeDecoder::new(26)),
             type_code: None,
@@ -249,12 +253,7 @@ mod tests {
 
         let mut second_cursor = 0;
         assert_eq!(
-            decoder.decode(
-                &code,
-                &mut reader,
-                &[0x12, 0, 0],
-                &mut second_cursor,
-            ),
+            decoder.decode(&code, &mut reader, &[0x12, 0, 0], &mut second_cursor,),
             Some(16625 + 0x1234)
         );
     }
