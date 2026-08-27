@@ -64,11 +64,9 @@ impl SimplePrefixCodeDecoder {
                 }
                 State::Symbols => {
                     while self.symbols_read < self.symbol_count {
-                        let Some(symbol) = reader.read_bits(
-                            input,
-                            cursor,
-                            u32::from(self.alphabet_bits),
-                        ) else {
+                        let Some(symbol) =
+                            reader.read_bits(input, cursor, u32::from(self.alphabet_bits))
+                        else {
                             return Ok(None);
                         };
                         let symbol = symbol as u16;
@@ -177,12 +175,7 @@ mod tests {
 
         let mut symbol_state = PrefixSymbolDecoder::default();
         assert_eq!(
-            code.decode(
-                &mut symbol_state,
-                &mut reader,
-                &[],
-                &mut cursor,
-            ),
+            code.decode(&mut symbol_state, &mut reader, &[], &mut cursor,),
             Some(5)
         );
     }
