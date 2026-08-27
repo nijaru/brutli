@@ -22,6 +22,7 @@ pub(super) struct CompressedHeaderDecoder {
     command_partition: Option<BlockPartition>,
     distance_partition: Option<BlockPartition>,
     distance_postfix_bits: u8,
+    num_direct_distance_codes: u16,
     literal_context_modes: Vec<u8>,
 }
 
@@ -50,6 +51,7 @@ impl Default for CompressedHeaderDecoder {
             command_partition: None,
             distance_partition: None,
             distance_postfix_bits: 0,
+            num_direct_distance_codes: 0,
             literal_context_modes: Vec::new(),
         }
     }
@@ -137,18 +139,18 @@ impl CompressedHeaderDecoder {
                     let Some(value) = reader.read_bits(input, cursor, 4) else {
                         return Ok(None);
                     };
-                    let num_direct_distance_codes =
+                    self.num_direct_distance_codes =
                         (value as u16) << self.distance_postfix_bits;
                     self.state = State::ContextModes;
-
-                    while self.literal_context_modes.len()
-                        < usize::from(
-                            self.literal_partition
-                                .as_ref()
-                                .expect("literal partition is decoded before context modes")
-                                .num_types,
-                        )
-                    {
+                }
+                State::ContextModes => {
+                    let count = usize::from(
+                        self.literal_partition
+                            .as_ref()
+                            .expect("literal partition is decoded before context modes")
+                            .num_types,
+                    );
+                    while self.literal_context_modes.len() < count {
                         let Some(mode) = reader.read_bits(input, cursor, 2) else {
                             return Ok(None);
                         };
@@ -170,12 +172,9 @@ impl CompressedHeaderDecoder {
                             .take()
                             .expect("distance partition is present at completion"),
                         distance_postfix_bits: self.distance_postfix_bits,
-                        num_direct_distance_codes,
+                        num_direct_distance_codes: self.num_direct_distance_codes,
                         literal_context_modes: core::mem::take(&mut self.literal_context_modes),
                     }));
-                }
-                State::ContextModes => {
-                    unreachable!("context modes are consumed with direct-distance parameters")
                 }
                 State::Done => unreachable!("compressed header decoded more than once"),
             }
