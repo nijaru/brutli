@@ -49,8 +49,13 @@ enum Phase {
     #[default]
     StreamHeader,
     MetaBlockHeader,
-    Uncompressed { remaining: usize },
-    Metadata { remaining: usize, is_last: bool },
+    Uncompressed {
+        remaining: usize,
+    },
+    Metadata {
+        remaining: usize,
+        is_last: bool,
+    },
     Done,
 }
 
@@ -66,11 +71,10 @@ impl Decoder {
         loop {
             match self.phase {
                 Phase::StreamHeader => {
-                    let Some(header) = self.stream_header.decode(
-                        &mut self.reader,
-                        input,
-                        &mut input_cursor,
-                    )? else {
+                    let Some(header) =
+                        self.stream_header
+                            .decode(&mut self.reader, input, &mut input_cursor)?
+                    else {
                         return Ok(ProcessResult {
                             consumed: input_cursor,
                             produced: output_cursor,
@@ -82,11 +86,10 @@ impl Decoder {
                     self.phase = Phase::MetaBlockHeader;
                 }
                 Phase::MetaBlockHeader => {
-                    let Some(header) = self.metablock_header.decode(
-                        &mut self.reader,
-                        input,
-                        &mut input_cursor,
-                    )? else {
+                    let Some(header) =
+                        self.metablock_header
+                            .decode(&mut self.reader, input, &mut input_cursor)?
+                    else {
                         return Ok(ProcessResult {
                             consumed: input_cursor,
                             produced: output_cursor,
