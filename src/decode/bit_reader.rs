@@ -35,11 +35,7 @@ impl BitReader {
             *cursor += 1;
         }
 
-        let mask = if count == 0 {
-            0
-        } else {
-            (1_u64 << count) - 1
-        };
+        let mask = if count == 0 { 0 } else { (1_u64 << count) - 1 };
         let value = self.buffer & mask;
         self.buffer >>= count;
         self.buffered -= count;
