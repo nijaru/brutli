@@ -1,6 +1,7 @@
 //! Internal incremental decoder implementation.
 
 mod bit_reader;
+mod complex_prefix_code;
 mod decoder;
 mod metablock_header;
 mod prefix_code;
