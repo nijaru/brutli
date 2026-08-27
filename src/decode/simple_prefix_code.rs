@@ -234,10 +234,10 @@ mod tests {
         let mut reader = BitReader::default();
         let mut cursor = 0;
 
-        assert_eq!(
+        assert!(matches!(
             decoder.decode(&mut reader, &input, &mut cursor),
             Err(SimplePrefixCodeError::DuplicateSymbol)
-        );
+        ));
     }
 
     #[test]
@@ -251,10 +251,10 @@ mod tests {
         let mut reader = BitReader::default();
         let mut cursor = 0;
 
-        assert_eq!(
+        assert!(matches!(
             decoder.decode(&mut reader, &input, &mut cursor),
             Err(SimplePrefixCodeError::InvalidSymbol)
-        );
+        ));
     }
 
     #[test]
@@ -272,11 +272,11 @@ mod tests {
         let mut reader = BitReader::default();
         let mut first_cursor = 0;
 
-        assert_eq!(
+        assert!(
             decoder
                 .decode(&mut reader, &input[..2], &mut first_cursor)
-                .unwrap(),
-            None
+                .unwrap()
+                .is_none()
         );
         assert_eq!(first_cursor, 2);
 
