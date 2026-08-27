@@ -1,9 +1,7 @@
 use super::bit_reader::BitReader;
 use super::prefix_code::{PrefixCode, PrefixCodeError, PrefixSymbolDecoder};
 
-const CODE_LENGTH_ORDER: [u8; 18] = [
-    1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-];
+const CODE_LENGTH_ORDER: [u8; 18] = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 const INITIAL_REPEATED_CODE_LENGTH: u8 = 8;
 const CODE_SPACE: i32 = 1 << 15;
 
@@ -107,9 +105,8 @@ impl ComplexPrefixCodeDecoder {
                         return Err(ComplexPrefixCodeError::InvalidCodeLengthAlphabet);
                     }
 
-                    self.code_length_code = Some(PrefixCode::from_code_lengths(
-                        &self.code_length_lengths,
-                    )?);
+                    self.code_length_code =
+                        Some(PrefixCode::from_code_lengths(&self.code_length_lengths)?);
                     self.state = State::CodeLengths;
                 }
                 State::CodeLengths => {
@@ -124,12 +121,9 @@ impl ComplexPrefixCodeDecoder {
                         .code_length_code
                         .as_ref()
                         .expect("code-length prefix code is initialized before decoding lengths");
-                    let Some(symbol) = code.decode(
-                        &mut self.code_length_symbol,
-                        reader,
-                        input,
-                        cursor,
-                    ) else {
+                    let Some(symbol) =
+                        code.decode(&mut self.code_length_symbol, reader, input, cursor)
+                    else {
                         return Ok(None);
                     };
 
@@ -169,11 +163,7 @@ impl ComplexPrefixCodeDecoder {
         Ok(())
     }
 
-    fn push_repeat(
-        &mut self,
-        symbol: u8,
-        extra: usize,
-    ) -> Result<(), ComplexPrefixCodeError> {
+    fn push_repeat(&mut self, symbol: u8, extra: usize) -> Result<(), ComplexPrefixCodeError> {
         let extra_bits = symbol - 14;
         let code_length = if symbol == 16 {
             self.previous_nonzero
@@ -220,11 +210,7 @@ impl ComplexPrefixCodeDecoder {
         Ok(())
     }
 
-    fn consume_space(
-        &mut self,
-        count: usize,
-        length: u8,
-    ) -> Result<(), ComplexPrefixCodeError> {
+    fn consume_space(&mut self, count: usize, length: u8) -> Result<(), ComplexPrefixCodeError> {
         let unit = CODE_SPACE >> length;
         let used = i32::try_from(count)
             .ok()
@@ -263,12 +249,7 @@ enum CodeLengthValueState {
 }
 
 impl CodeLengthValueDecoder {
-    fn decode(
-        &mut self,
-        reader: &mut BitReader,
-        input: &[u8],
-        cursor: &mut usize,
-    ) -> Option<u8> {
+    fn decode(&mut self, reader: &mut BitReader, input: &[u8], cursor: &mut usize) -> Option<u8> {
         loop {
             match self.state {
                 CodeLengthValueState::FirstTwo => match reader.read_bits(input, cursor, 2)? {
@@ -302,8 +283,7 @@ impl CodeLengthValueDecoder {
 #[cfg(test)]
 mod tests {
     use super::{
-        CODE_LENGTH_ORDER, CodeLengthValueDecoder, ComplexPrefixCodeDecoder,
-        ComplexPrefixCodeError,
+        CODE_LENGTH_ORDER, CodeLengthValueDecoder, ComplexPrefixCodeDecoder, ComplexPrefixCodeError,
     };
     use crate::decode::bit_reader::BitReader;
     use crate::decode::prefix_code::PrefixSymbolDecoder;
