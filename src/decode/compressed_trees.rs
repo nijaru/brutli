@@ -88,8 +88,10 @@ impl CompressedTreesDecoder {
                         return Ok(None);
                     };
                     self.command = trees;
-                    self.current =
-                        TreeGroupDecoder::new(self.distance_alphabet_size, self.distance_tree_count);
+                    self.current = TreeGroupDecoder::new(
+                        self.distance_alphabet_size,
+                        self.distance_tree_count,
+                    );
                     self.state = State::Distance;
                 }
                 State::Distance => {
