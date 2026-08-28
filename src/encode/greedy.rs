@@ -26,14 +26,13 @@ const CONTEXT_SAVINGS_THRESHOLD: f64 = 0.2;
 
 const NO_LITERAL_CONTEXT_MAP: [u8; 64] = [0; 64];
 const SIMPLE_UTF8_CONTEXT_MAP: [u8; 64] = [
-    0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const COMPLEX_UTF8_CONTEXT_MAP: [u8; 64] = [
-    11, 11, 12, 12, 0, 0, 0, 0, 1, 1, 9, 9, 2, 2, 2, 2, 1, 1, 1, 1, 8, 3, 3, 3, 1, 1, 1,
-    1, 2, 2, 2, 2, 8, 4, 4, 4, 8, 7, 4, 4, 8, 0, 0, 0, 3, 3, 3, 3, 5, 5, 10, 5, 5, 5,
-    10, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+    11, 11, 12, 12, 0, 0, 0, 0, 1, 1, 9, 9, 2, 2, 2, 2, 1, 1, 1, 1, 8, 3, 3, 3, 1, 1, 1, 1, 2, 2,
+    2, 2, 8, 4, 4, 4, 8, 7, 4, 4, 8, 0, 0, 0, 3, 3, 3, 3, 5, 5, 10, 5, 5, 5, 10, 5, 6, 6, 6, 6, 6,
+    6, 6, 6,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -365,7 +364,10 @@ fn should_use_complex_context(input: &[u8]) -> bool {
     }
 
     let entropy_one = estimate_entropy(&combined) / total as f64;
-    let entropy_context = contextual.iter().map(|histogram| estimate_entropy(histogram)).sum::<f64>()
+    let entropy_context = contextual
+        .iter()
+        .map(|histogram| estimate_entropy(histogram))
+        .sum::<f64>()
         / total as f64;
     entropy_context <= 3.0 && entropy_one - entropy_context >= CONTEXT_SAVINGS_THRESHOLD
 }
@@ -514,7 +516,13 @@ mod tests {
     #[test]
     fn q5_context_maps_match_reference_shapes() {
         assert_eq!(&SIMPLE_UTF8_CONTEXT_MAP[..4], &[0, 0, 1, 1]);
-        assert_eq!(SIMPLE_UTF8_CONTEXT_MAP.iter().filter(|&&value| value == 1).count(), 2);
+        assert_eq!(
+            SIMPLE_UTF8_CONTEXT_MAP
+                .iter()
+                .filter(|&&value| value == 1)
+                .count(),
+            2
+        );
         assert_eq!(COMPLEX_UTF8_CONTEXT_MAP.iter().copied().max(), Some(12));
     }
 
