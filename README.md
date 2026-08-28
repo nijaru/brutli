@@ -4,7 +4,7 @@ An idiomatic Brotli implementation.
 
 Brutli is a ground-up implementation of the Brotli format based on the specification rather than a translation of the reference C implementation.
 
-> **Status:** the RFC 7932 decoder is functional and under compatibility and performance validation. Brutli is not yet ready for production use.
+> **Status:** the RFC 7932 decoder is functional and the one-shot encoder now produces both compressed and stored streams. Brutli remains under compatibility, corpus, and performance validation and is not yet ready for production use.
 
 ## Current decoder
 
@@ -20,7 +20,7 @@ Brutli is a ground-up implementation of the Brotli format based on the specifica
 - Stable Rust 1.98 and Rust 2024 Edition.
 - No mandatory third-party dependencies.
 
-### One-shot
+### One-shot decoding
 
 ```rust
 let compressed = /* Brotli bytes */;
@@ -30,7 +30,7 @@ let decoded = brutli::decompress(compressed, 16 * 1024 * 1024)?;
 
 The second argument is the maximum allowed decoded size. Trailing bytes after the Brotli stream are rejected.
 
-### Incremental
+### Incremental decoding
 
 ```rust
 use brutli::{DecodeStatus, Decoder};
@@ -74,11 +74,32 @@ reader.read_to_end(&mut decoded)?;
 
 Using `BufRead` lets the adapter stop exactly at the end of the first Brotli stream while preserving already-buffered trailing bytes in the underlying reader.
 
+## Current encoder
+
+The public encoder is currently a one-shot API:
+
+```rust
+let compressed = brutli::compress(b"Brotli data");
+```
+
+Its current baseline includes:
+
+- RFC 7932 stream and meta-block framing.
+- A fast greedy LZ77 parser with a compact 64K last-position hash table.
+- Canonical literal, command, and distance prefix-code generation.
+- Simple and complex prefix-tree serialization.
+- General backward-distance encoding plus direct short-distance codes.
+- Specialized short-period encoding for highly repetitive input.
+- Stored-block fallback when compression is not beneficial.
+- Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
+
+The encoder deliberately does not expose quality levels yet. Match-search depth, context modeling, block splitting, recent-distance optimization, and other ratio/quality heuristics should be added only after broader corpus measurements justify them.
+
 ## Goals
 
-- Correct RFC 7932 decoding.
+- Correct RFC 7932 decoding and encoding.
 - Idiomatic stable Rust and Rust 2024 Edition.
-- A low-overhead buffer-to-buffer streaming core independent of `std::io`.
+- A low-overhead buffer-to-buffer streaming decoder core independent of `std::io`.
 - Safe public APIs, with any future `unsafe` restricted to small, measured optimization kernels with documented invariants and portable fallbacks.
 - Minimal mandatory dependencies and allocation-conscious hot paths.
 - Differential and fuzz testing against mature Brotli implementations.
@@ -87,15 +108,16 @@ Using `BufRead` lets the adapter stop exactly at the end of the first Brotli str
 
 ## Validation
 
-The decoder currently includes:
+The project currently includes:
 
-- reference-produced compatibility fixtures,
-- a generated differential matrix covering qualities 0 through 11 and multiple window sizes,
-- multi-megabyte reference streams exercising repeated history-window wraparound,
+- reference-produced decoder compatibility fixtures,
+- a generated differential matrix covering reference qualities 0 through 11 and multiple window sizes,
+- multi-megabyte streams exercising repeated history-window wraparound,
 - a bytewise reference model for validating optimized ring/history operations,
 - deterministic malformed-input and truncation tests,
 - single-bit mutation tests,
-- a `cargo-fuzz` libFuzzer target with CI smoke runs and scheduled longer runs.
+- external-decoder interoperability tests for Brutli encoder output,
+- separate decoder and encoder-round-trip `cargo-fuzz` targets with CI smoke runs and scheduled longer runs.
 
 Run the normal validation with:
 
@@ -106,17 +128,18 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Benchmarks
 
-The decoder benchmark compares Brutli with the official Google Brotli C decoder and `rust-brotli` on text, highly repetitive data, and incompressible binary data:
+Decoder and encoder benchmarks compare Brutli with the official Google Brotli C implementation and `rust-brotli`:
 
 ```text
 cargo bench --bench decode
+cargo bench --bench encode
 ```
 
-The harness validates every fixture before timing and reports decoded-byte throughput for multiple API shapes: Brutli's direct incremental core with both whole-output and 8 KiB output slices, one-shot helper, and `Read` adapter; the official Google Brotli `BrotliDecoderDecompress` path; and `rust-brotli`'s direct `brotli_decode`, `Decompressor`, and `BrotliDecompress` paths.
+The decoder harness reports decoded-byte throughput across direct incremental, one-shot, and `Read` APIs. The encoder harness reports both compressed sizes and source-byte throughput for Brutli, Google Brotli, and `rust-brotli` at representative reference quality settings.
 
-GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. The next performance phase is controlled local profiling and benchmarking against both `rust-brotli` and the official Google Brotli decoder, including CPU counters and allocation/memory measurements.
+Every benchmark fixture is validated for correctness before timing. GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. Broader corpus measurements and controlled local profiling remain the basis for performance and ratio decisions.
 
-On Linux with `perf` installed, the reproducible profiling helper runs CPU-counter comparisons for all three Brutli fixtures plus the direct Google/rust-brotli binary comparators, then records a call graph for Brutli's binary path:
+On Linux with `perf` installed, the reproducible decoder profiling helper runs CPU-counter comparisons for all three decoder fixtures plus the direct Google/rust-brotli binary comparators, then records a call graph for Brutli's binary path:
 
 ```text
 bash scripts/profile-decode.sh
@@ -124,19 +147,20 @@ bash scripts/profile-decode.sh
 
 It writes `perf-brutli-binary.data` and a text report at `perf-brutli-binary.txt`. `PERF_RUNS`, `SAMPLE_COUNT`, `SAMPLE_SIZE`, and `RECORD_SAMPLE_SIZE` can be overridden in the environment when a longer or shorter profile is desired.
 
-## Non-goals for the initial decoder
+## Initial non-goals
 
 - API compatibility with `rust-brotli`.
-- Async-runtime-specific APIs. Async adapters can drive the same streaming core externally.
+- Async-runtime-specific APIs. Async adapters can drive the same streaming decoder core externally.
 - `no_std` as an initial compatibility promise. The core should avoid unnecessary `std` coupling so this can be evaluated later.
 - SIMD before profiling demonstrates a useful target.
+- Premature encoder quality controls before the baseline is measured across representative corpora.
 
 ## Plan
 
-1. Finish RFC 7932 compatibility and adversarial validation.
-2. Establish decoder performance and allocation baselines against `rust-brotli` and Google Brotli.
-3. Optimize measured hot paths while preserving a portable scalar implementation.
-4. Build the encoder, starting with correctness and then improving ratio and throughput.
+1. Continue RFC 7932 compatibility and adversarial validation.
+2. Broaden encoder ratio/throughput benchmarks beyond synthetic fixtures.
+3. Optimize only measured decoder and encoder hot paths.
+4. Add encoder quality/ratio features where corpus results justify the complexity.
 5. Add RFC 9841 functionality after RFC 7932 compatibility is mature.
 
 See [DESIGN.md](DESIGN.md) for architecture and implementation constraints.
