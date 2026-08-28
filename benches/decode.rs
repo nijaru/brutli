@@ -121,7 +121,10 @@ fn brutli_decode_into(input: &[u8], output: &mut [u8]) -> usize {
                 finishing = true;
             }
             DecodeStatus::NeedOutput => {
-                assert!(output_offset < output.len(), "direct-slice output buffer exhausted");
+                assert!(
+                    output_offset < output.len(),
+                    "direct-slice output buffer exhausted"
+                );
             }
         }
     }
@@ -162,10 +165,8 @@ fn bench_rust_brotli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case
         .counter(BytesCount::new(case.source.len()))
         .bench(|| {
             let mut output = vec![0_u8; case.source.len() + 1];
-            let info = brotli_decompressor::brotli_decode(
-                divan::black_box(&case.compressed),
-                &mut output,
-            );
+            let info =
+                brotli_decompressor::brotli_decode(divan::black_box(&case.compressed), &mut output);
             divan::black_box((output, info.decoded_size))
         });
 }
