@@ -30,6 +30,15 @@ impl Case {
             "Brutli direct-slice fixture failed validation"
         );
 
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let decoded_size = brutli_decode_into_chunked(&compressed, &mut decoded, 8192);
+        assert_eq!(decoded_size, source.len());
+        assert_eq!(
+            &decoded[..decoded_size],
+            source,
+            "Brutli 8 KiB direct-slice fixture failed validation"
+        );
+
         let mut reader = brotli::Decompressor::new(compressed.as_slice(), 4096);
         let mut decoded = Vec::with_capacity(source.len());
         reader.read_to_end(&mut decoded).unwrap();
@@ -104,17 +113,25 @@ fn main() {
 }
 
 fn brutli_decode_into(input: &[u8], output: &mut [u8]) -> usize {
+    brutli_decode_into_chunked(input, output, usize::MAX)
+}
+
+fn brutli_decode_into_chunked(input: &[u8], output: &mut [u8], max_chunk: usize) -> usize {
+    assert!(max_chunk != 0);
+
     let mut decoder = brutli::Decoder::new();
     let mut input_offset = 0;
     let mut output_offset = 0;
     let mut finishing = false;
 
     loop {
+        let output_end = output_offset.saturating_add(max_chunk).min(output.len());
+        let output_chunk = &mut output[output_offset..output_end];
         let progress = if finishing {
-            decoder.finish(&mut output[output_offset..]).unwrap()
+            decoder.finish(output_chunk).unwrap()
         } else {
             decoder
-                .process(&input[input_offset..], &mut output[output_offset..])
+                .process(&input[input_offset..], output_chunk)
                 .unwrap()
         };
 
@@ -158,6 +175,20 @@ fn bench_brutli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
             let decoded_size = brutli_decode_into(
                 divan::black_box(&case.compressed),
                 divan::black_box(&mut output),
+            );
+            divan::black_box(decoded_size)
+        });
+}
+
+fn bench_brutli_direct_8k(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    let mut output = vec![0_u8; case.source.len() + 1];
+    bencher
+        .counter(BytesCount::new(case.source.len()))
+        .bench_local(move || {
+            let decoded_size = brutli_decode_into_chunked(
+                divan::black_box(&case.compressed),
+                divan::black_box(&mut output),
+                8192,
             );
             divan::black_box(decoded_size)
         });
@@ -256,6 +287,11 @@ macro_rules! decode_benches {
             #[divan::bench]
             fn brutli_direct(bencher: divan::Bencher<'_, '_>) {
                 bench_brutli_direct(bencher, &$case);
+            }
+
+            #[divan::bench]
+            fn brutli_direct_8k(bencher: divan::Bencher<'_, '_>) {
+                bench_brutli_direct_8k(bencher, &$case);
             }
 
             #[divan::bench]
