@@ -8,6 +8,7 @@ mod compressed_header;
 mod compressed_trees;
 mod context_map;
 mod decoder;
+mod distance;
 mod metablock_header;
 mod prefix_code;
 mod prefix_code_decoder;
