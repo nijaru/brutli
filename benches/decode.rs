@@ -15,12 +15,18 @@ impl Case {
         encoder.read_to_end(&mut compressed).unwrap();
 
         let decoded = brutli::decompress(&compressed, source.len()).unwrap();
-        assert_eq!(decoded, source, "Brutli benchmark fixture failed validation");
+        assert_eq!(
+            decoded, source,
+            "Brutli benchmark fixture failed validation"
+        );
 
         let mut reader = brotli::Decompressor::new(compressed.as_slice(), 4096);
         let mut decoded = Vec::with_capacity(source.len());
         reader.read_to_end(&mut decoded).unwrap();
-        assert_eq!(decoded, source, "rust-brotli reader fixture failed validation");
+        assert_eq!(
+            decoded, source,
+            "rust-brotli reader fixture failed validation"
+        );
 
         let mut input = compressed.as_slice();
         let mut decoded = Vec::with_capacity(source.len());
@@ -72,7 +78,8 @@ fn bench_brutli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| {
-            let mut decoder = brutli::DecoderReader::new(divan::black_box(case.compressed.as_slice()));
+            let mut decoder =
+                brutli::DecoderReader::new(divan::black_box(case.compressed.as_slice()));
             let mut output = Vec::with_capacity(case.source.len());
             decoder.read_to_end(&mut output).unwrap();
             output
