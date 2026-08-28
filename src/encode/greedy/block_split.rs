@@ -534,7 +534,7 @@ fn run_length_code_zeros(values: &mut Vec<u32>) -> u32 {
         }
 
         let mut repetitions = 1_u32;
-        while index + repetitions as usize < values.len()
+        while index + (repetitions as usize) < values.len()
             && values[index + repetitions as usize] == 0
         {
             repetitions += 1;
