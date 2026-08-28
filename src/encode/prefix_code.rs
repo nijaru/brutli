@@ -21,9 +21,8 @@ impl PrefixEncoding {
         let mut symbols: Vec<u16> = frequencies
             .iter()
             .enumerate()
-            .filter_map(|(symbol, &frequency)| {
-                (frequency != 0).then(|| u16::try_from(symbol).expect("alphabet fits in u16"))
-            })
+            .filter(|&(_, &frequency)| frequency != 0)
+            .map(|(symbol, _)| u16::try_from(symbol).expect("alphabet fits in u16"))
             .collect();
         if symbols.is_empty() {
             return None;
@@ -251,7 +250,8 @@ fn code_length_code(frequencies: &[usize; 18]) -> ([u8; 18], [Option<SymbolCode>
     let mut active: Vec<u8> = frequencies
         .iter()
         .enumerate()
-        .filter_map(|(symbol, &frequency)| (frequency != 0).then_some(symbol as u8))
+        .filter(|&(_, &frequency)| frequency != 0)
+        .map(|(symbol, _)| symbol as u8)
         .collect();
     debug_assert!(!active.is_empty());
 
@@ -379,11 +379,9 @@ mod tests {
     fn zero_run_tokenization_resets_repeat_chains() {
         let lengths = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
         let tokens = tokenize_code_lengths(&lengths);
-        assert_eq!(tokens[0].symbol, 2);
-        assert_eq!(tokens[1].symbol, 17);
+        let symbols: Vec<u8> = tokens.iter().map(|token| token.symbol).collect();
+
+        assert_eq!(symbols, [2, 17, 0, 0, 0, 2]);
         assert_eq!(tokens[1].extra, 7);
-        assert_eq!(tokens[2].symbol, 0);
-        assert_eq!(tokens[3].symbol, 17);
-        assert_eq!(tokens.last().unwrap().symbol, 2);
     }
 }
