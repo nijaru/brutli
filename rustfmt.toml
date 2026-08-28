@@ -1,0 +1,2 @@
+style_edition = "2024"
+ignore = ["src/encode/static_dictionary.rs"]
