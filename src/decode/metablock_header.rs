@@ -16,9 +16,9 @@ pub(super) enum MetaBlockKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MetaBlockHeaderError {
-    NonZeroPadding,
-    NonZeroReservedBit,
-    NonMinimalLength,
+    PaddingNotZero,
+    ReservedBitSet,
+    LengthNotMinimal,
 }
 
 #[derive(Debug, Default)]
@@ -103,7 +103,7 @@ impl MetaBlockHeaderDecoder {
                         };
 
                         if self.index + 1 == self.width && self.width > 4 && nibble == 0 {
-                            return Err(MetaBlockHeaderError::NonMinimalLength);
+                            return Err(MetaBlockHeaderError::LengthNotMinimal);
                         }
 
                         self.value |= (nibble as usize) << (4 * self.index);
@@ -128,7 +128,7 @@ impl MetaBlockHeaderDecoder {
                 }
                 State::UncompressedAlignment => {
                     if !reader.align_to_byte_with_zero_fill() {
-                        return Err(MetaBlockHeaderError::NonZeroPadding);
+                        return Err(MetaBlockHeaderError::PaddingNotZero);
                     }
                     let length = self.value + 1;
                     return Ok(Some(self.finish(MetaBlockKind::Uncompressed { length })));
@@ -138,7 +138,7 @@ impl MetaBlockHeaderDecoder {
                         return Ok(None);
                     };
                     if bit != 0 {
-                        return Err(MetaBlockHeaderError::NonZeroReservedBit);
+                        return Err(MetaBlockHeaderError::ReservedBitSet);
                     }
                     self.state = State::MetadataLengthWidth;
                 }
@@ -163,7 +163,7 @@ impl MetaBlockHeaderDecoder {
                         };
 
                         if self.index + 1 == self.width && self.width > 1 && byte == 0 {
-                            return Err(MetaBlockHeaderError::NonMinimalLength);
+                            return Err(MetaBlockHeaderError::LengthNotMinimal);
                         }
 
                         self.value |= (byte as usize) << (8 * self.index);
@@ -174,14 +174,14 @@ impl MetaBlockHeaderDecoder {
                 }
                 State::MetadataAlignment => {
                     if !reader.align_to_byte_with_zero_fill() {
-                        return Err(MetaBlockHeaderError::NonZeroPadding);
+                        return Err(MetaBlockHeaderError::PaddingNotZero);
                     }
                     let length = self.value;
                     return Ok(Some(self.finish(MetaBlockKind::Metadata { length })));
                 }
                 State::EndAlignment => {
                     if !reader.align_to_byte_with_zero_fill() {
-                        return Err(MetaBlockHeaderError::NonZeroPadding);
+                        return Err(MetaBlockHeaderError::PaddingNotZero);
                     }
                     self.state = State::Done;
                     return Ok(Some(MetaBlockHeader {
@@ -308,7 +308,7 @@ mod tests {
 
         assert_eq!(
             decode(&bits.into_bytes()),
-            Err(MetaBlockHeaderError::NonZeroReservedBit)
+            Err(MetaBlockHeaderError::ReservedBitSet)
         );
     }
 
@@ -321,7 +321,7 @@ mod tests {
 
         assert_eq!(
             decode(&bits.into_bytes()),
-            Err(MetaBlockHeaderError::NonMinimalLength)
+            Err(MetaBlockHeaderError::LengthNotMinimal)
         );
     }
 
@@ -337,7 +337,7 @@ mod tests {
 
         assert_eq!(
             decode(&bits.into_bytes()),
-            Err(MetaBlockHeaderError::NonMinimalLength)
+            Err(MetaBlockHeaderError::LengthNotMinimal)
         );
     }
 
@@ -382,7 +382,7 @@ mod tests {
 
         assert_eq!(
             decode(&bits.into_bytes()),
-            Err(MetaBlockHeaderError::NonZeroPadding)
+            Err(MetaBlockHeaderError::PaddingNotZero)
         );
     }
 }

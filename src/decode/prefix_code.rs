@@ -104,8 +104,8 @@ impl CanonicalCode {
 
         let mut symbols = Vec::with_capacity(non_zero);
         let mut first_symbol = [0_u16; MAX_CODE_BITS + 1];
-        for length in 1..=MAX_CODE_BITS {
-            first_symbol[length] = symbols.len() as u16;
+        for (length, first) in first_symbol.iter_mut().enumerate().skip(1) {
+            *first = symbols.len() as u16;
             for (symbol, &symbol_length) in lengths.iter().enumerate() {
                 if usize::from(symbol_length) == length {
                     symbols.push(symbol as u16);

@@ -28,6 +28,10 @@ pub(super) struct PrefixCodeDecoder {
 }
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "keeping complex prefix-code construction inline avoids a heap allocation per tree"
+)]
 enum State {
     #[default]
     Representation,

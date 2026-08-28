@@ -45,10 +45,10 @@ const OMIT_FIRST_BASE: u8 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DictionaryError {
-    InvalidCopyLength,
-    InvalidDistance,
-    InvalidTransform,
-    InvalidWord,
+    CopyLength,
+    Distance,
+    Transform,
+    Word,
 }
 
 pub(super) fn transform(
@@ -59,32 +59,30 @@ pub(super) fn transform(
     let shift = *SIZE_BITS_BY_LENGTH
         .get(copy_length)
         .filter(|&&shift| shift != 0)
-        .ok_or(DictionaryError::InvalidCopyLength)?;
+        .ok_or(DictionaryError::CopyLength)?;
 
     let address = distance
         .checked_sub(max_backward_distance)
         .and_then(|distance| distance.checked_sub(1))
-        .ok_or(DictionaryError::InvalidDistance)?;
+        .ok_or(DictionaryError::Distance)?;
     let word_mask = (1_usize << shift) - 1;
     let word_index = address & word_mask;
     let transform_index = address >> shift;
     if transform_index >= TRANSFORM_COUNT {
-        return Err(DictionaryError::InvalidTransform);
+        return Err(DictionaryError::Transform);
     }
 
     let offset = OFFSETS_BY_LENGTH[copy_length]
         .checked_add(
             word_index
                 .checked_mul(copy_length)
-                .ok_or(DictionaryError::InvalidWord)?,
+                .ok_or(DictionaryError::Word)?,
         )
-        .ok_or(DictionaryError::InvalidWord)?;
+        .ok_or(DictionaryError::Word)?;
     let end = offset
         .checked_add(copy_length)
-        .ok_or(DictionaryError::InvalidWord)?;
-    let word = DICTIONARY
-        .get(offset..end)
-        .ok_or(DictionaryError::InvalidWord)?;
+        .ok_or(DictionaryError::Word)?;
+    let word = DICTIONARY.get(offset..end).ok_or(DictionaryError::Word)?;
 
     transform_word(word, transform_index)
 }
@@ -102,7 +100,7 @@ fn transform_word(word: &[u8], transform_index: usize) -> Result<Vec<u8>, Dictio
             (omitted.min(word.len()), word.len())
         }
         IDENTITY | UPPERCASE_FIRST | UPPERCASE_ALL => (0, word.len()),
-        _ => return Err(DictionaryError::InvalidTransform),
+        _ => return Err(DictionaryError::Transform),
     };
 
     let transformed_word = &word[start..end];
@@ -133,16 +131,12 @@ fn affix(id: u8) -> Result<&'static [u8], DictionaryError> {
     let start = usize::from(
         *PREFIX_SUFFIX_MAP
             .get(usize::from(id))
-            .ok_or(DictionaryError::InvalidTransform)?,
+            .ok_or(DictionaryError::Transform)?,
     );
-    let length = usize::from(
-        *PREFIX_SUFFIX
-            .get(start)
-            .ok_or(DictionaryError::InvalidTransform)?,
-    );
+    let length = usize::from(*PREFIX_SUFFIX.get(start).ok_or(DictionaryError::Transform)?);
     PREFIX_SUFFIX
         .get(start + 1..start + 1 + length)
-        .ok_or(DictionaryError::InvalidTransform)
+        .ok_or(DictionaryError::Transform)
 }
 
 fn uppercase_at(word: &mut [u8], offset: usize) -> usize {
@@ -201,11 +195,11 @@ mod tests {
 
     #[test]
     fn rejects_invalid_dictionary_addresses() {
-        assert_eq!(transform(1, 3, 0), Err(DictionaryError::InvalidCopyLength));
-        assert_eq!(transform(4, 4, 4), Err(DictionaryError::InvalidDistance));
+        assert_eq!(transform(1, 3, 0), Err(DictionaryError::CopyLength));
+        assert_eq!(transform(4, 4, 4), Err(DictionaryError::Distance));
         assert_eq!(
             transform(distance(0, 121, 0), 4, 0),
-            Err(DictionaryError::InvalidTransform)
+            Err(DictionaryError::Transform)
         );
     }
 }
