@@ -10,6 +10,7 @@
 use std::fmt;
 
 mod decode;
+mod dictionary;
 mod encode;
 mod reader;
 
