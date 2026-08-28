@@ -1,6 +1,6 @@
 const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
-const BUCKET_SIZE: usize = 4;
+const BUCKET_SIZE: usize = 2;
 const MIN_MATCH: usize = 4;
 const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
@@ -180,25 +180,25 @@ mod tests {
     }
 
     #[test]
-    fn ring_bucket_keeps_four_most_recent_positions() {
-        let mut bucket = [EMPTY; 4];
+    fn ring_bucket_keeps_two_most_recent_positions() {
+        let mut bucket = [EMPTY; 2];
         let mut cursor = 0;
         for position in [2, 4, 7, 9, 10, 12] {
             insert_position(&mut bucket, &mut cursor, position);
         }
         bucket.sort_unstable();
-        assert_eq!(bucket, [7, 9, 10, 12]);
-        assert_eq!(cursor, 2);
+        assert_eq!(bucket, [10, 12]);
+        assert_eq!(cursor, 0);
     }
 
     #[test]
     fn selects_longest_candidate_then_nearest_tie() {
         let source = b"abcdWXYZabcdQRSTabcdWXYZ";
-        let candidates = [0, 8, EMPTY, EMPTY];
+        let candidates = [0, 8];
         assert_eq!(best_match(source, 16, &candidates), Some((0, 8)));
 
         let tied = b"abcdxxxxabcdyyyyabcdzzzz";
-        let candidates = [0, 8, EMPTY, EMPTY];
+        let candidates = [0, 8];
         assert_eq!(best_match(tied, 16, &candidates), Some((8, 4)));
     }
 
