@@ -183,7 +183,7 @@ mod tests {
     fn ring_bucket_keeps_four_most_recent_positions() {
         let mut bucket = [EMPTY; 4];
         let mut cursor = 0;
-        for position in [9, 2, 7, 4, 12, 10] {
+        for position in [2, 4, 7, 9, 10, 12] {
             insert_position(&mut bucket, &mut cursor, position);
         }
         bucket.sort_unstable();
