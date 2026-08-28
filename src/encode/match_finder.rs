@@ -1,4 +1,5 @@
 use super::distance::RecentDistances;
+use super::static_dictionary::DictionarySearch;
 
 const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
 const BUCKET_BITS: usize = 14;
@@ -38,6 +39,7 @@ pub(super) struct Parse {
 #[derive(Debug, Clone, Copy)]
 struct SearchResult {
     length: usize,
+    length_code: usize,
     distance: usize,
     score: usize,
 }
@@ -46,6 +48,7 @@ impl SearchResult {
     const fn new() -> Self {
         Self {
             length: 0,
+            length_code: 0,
             distance: 0,
             score: MIN_SCORE,
         }
@@ -56,6 +59,7 @@ impl SearchResult {
 struct QualityFiveHasher {
     counts: Vec<u16>,
     buckets: Vec<u32>,
+    dictionary: DictionarySearch,
 }
 
 impl QualityFiveHasher {
@@ -63,6 +67,7 @@ impl QualityFiveHasher {
         Self {
             counts: vec![0; BUCKET_COUNT],
             buckets: vec![0; BUCKET_COUNT * BLOCK_SIZE],
+            dictionary: DictionarySearch::default(),
         }
     }
 
@@ -122,6 +127,7 @@ impl QualityFiveHasher {
                         best_length = length;
                         result = SearchResult {
                             length,
+                            length_code: length,
                             distance: backward,
                             score,
                         };
@@ -157,6 +163,7 @@ impl QualityFiveHasher {
                     best_length = length;
                     result = SearchResult {
                         length,
+                        length_code: length,
                         distance: backward,
                         score,
                     };
@@ -167,6 +174,24 @@ impl QualityFiveHasher {
         let offset = bucket_start + (count & BLOCK_MASK);
         self.buckets[offset] = position as u32;
         self.counts[key] = self.counts[key].wrapping_add(1);
+
+        if result.score == MIN_SCORE
+            && let Some(found) = self.dictionary.find(
+                input,
+                position,
+                max_length,
+                max_backward,
+                MAX_BACKWARD_DISTANCE,
+                MIN_SCORE,
+            )
+        {
+            result = SearchResult {
+                length: found.length,
+                length_code: found.length_code,
+                distance: found.distance,
+                score: found.score,
+            };
+        }
         result
     }
 }
@@ -245,7 +270,7 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
                 insert_start,
                 insert_length,
                 copy_length: result.length,
-                copy_length_code: result.length,
+                copy_length_code: result.length_code,
                 distance: result.distance,
                 distance_code,
             });
@@ -303,7 +328,7 @@ fn hash4(input: &[u8], position: usize) -> usize {
     ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
 }
 
-fn backward_reference_score(copy_length: usize, distance: usize) -> usize {
+pub(super) fn backward_reference_score(copy_length: usize, distance: usize) -> usize {
     SCORE_BASE + LITERAL_BYTE_SCORE * copy_length
         - DISTANCE_BIT_PENALTY * log2_floor_nonzero(distance)
 }
@@ -373,6 +398,16 @@ mod tests {
         assert_eq!(first.distance_code, 0);
         assert_eq!(first.copy_length, 8);
         assert_eq!(parse.tail_start, 12);
+    }
+
+    #[test]
+    fn dictionary_match_keeps_reference_length_code() {
+        let parse = create_backward_references(b"time and more");
+        let first = parse.commands[0];
+        assert_eq!(first.insert_length, 0);
+        assert_eq!(first.copy_length, 4);
+        assert_eq!(first.copy_length_code, 4);
+        assert!(first.distance > 0);
     }
 
     #[test]
