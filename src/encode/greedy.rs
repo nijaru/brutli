@@ -86,12 +86,9 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     );
 
     let baseline_literal_bits = literal_code.data_bits(&literal_frequencies);
-    let Some(model) = build_literal_context_model(
-        input,
-        &commands,
-        tail_start,
-        baseline_literal_bits,
-    ) else {
+    let Some(model) =
+        build_literal_context_model(input, &commands, tail_start, baseline_literal_bits)
+    else {
         return Some(baseline);
     };
 
@@ -266,12 +263,8 @@ fn write_contextual_literal_range(
 }
 
 fn utf8_context_id(input: &[u8], position: usize) -> usize {
-    let previous = position
-        .checked_sub(1)
-        .map_or(0, |index| input[index]);
-    let second_previous = position
-        .checked_sub(2)
-        .map_or(0, |index| input[index]);
+    let previous = position.checked_sub(1).map_or(0, |index| input[index]);
+    let second_previous = position.checked_sub(2).map_or(0, |index| input[index]);
     usize::from(utf8_previous(previous) | utf8_second_previous(second_previous))
 }
 
@@ -326,10 +319,7 @@ fn write_two_tree_compressed_header(
     write_var_len_u8(writer, 0); // one distance tree
 }
 
-fn write_two_tree_context_map(
-    writer: &mut BitWriter,
-    context_map: &[u8; LITERAL_CONTEXT_COUNT],
-) {
+fn write_two_tree_context_map(writer: &mut BitWriter, context_map: &[u8; LITERAL_CONTEXT_COUNT]) {
     writer.write_bits(0, 1); // RLEMAX = 0
     write_simple_prefix_code(writer, &[0, 1], 2);
     for &tree in context_map {
