@@ -1,0 +1,38 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - Cargo.toml
+      - "src/**"
+      - "fuzz/**"
+      - .github/workflows/fuzz.yml
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            cargo fuzz run decode -- -max_total_time=300
+          else
+            cargo fuzz run decode -- -runs=10000
+          fi
