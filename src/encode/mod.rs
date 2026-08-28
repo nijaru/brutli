@@ -4,6 +4,7 @@ mod distance;
 mod greedy;
 mod match_finder;
 mod prefix_code;
+mod static_dictionary;
 
 use bit_writer::BitWriter;
 use command::{ExplicitCommand, InsertCommand};
