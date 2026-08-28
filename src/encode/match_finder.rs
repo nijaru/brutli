@@ -154,6 +154,6 @@ mod tests {
     #[test]
     fn word_extension_stops_at_first_mismatch() {
         let source = b"abcdefghijklmnopabcdefghijklXnop";
-        assert_eq!(extend_match(source, 0, 16), 5);
+        assert_eq!(extend_match(source, 0, 16), 12);
     }
 }
