@@ -1,6 +1,6 @@
 use super::bit_writer::BitWriter;
 use super::command::{ExplicitCommand, InsertCommand};
-use super::distance::{DistanceCode, alphabet_size};
+use super::distance::{DistanceCode, RecentDistances, alphabet_size};
 use super::match_finder::{MatchCommand, greedy_parse};
 use super::prefix_code::PrefixEncoding;
 use super::{
@@ -30,10 +30,11 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
     let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
     let mut commands = Vec::with_capacity(parse.commands.len());
+    let mut recent_distances = RecentDistances::default();
 
     for parsed in parse.commands {
         let command = ExplicitCommand::for_lengths(parsed.insert_length, parsed.copy_length);
-        let distance = DistanceCode::for_distance(parsed.distance, DIRECT_DISTANCE_CODES);
+        let distance = recent_distances.encode(parsed.distance, DIRECT_DISTANCE_CODES);
         command_frequencies[usize::from(command.symbol)] += 1;
         distance_frequencies[usize::from(distance.symbol)] += 1;
         count_literals(
