@@ -54,8 +54,30 @@ impl History {
     }
 
     pub(super) fn push_slice(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.push(byte);
+        if bytes.is_empty() {
+            return;
+        }
+
+        self.update_previous(bytes);
+        self.available = self
+            .available
+            .saturating_add(bytes.len())
+            .min(self.window_size);
+
+        let mut remaining = bytes;
+        if self.buffer.len() < self.ring_size {
+            let grow = remaining.len().min(self.ring_size - self.buffer.len());
+            self.buffer.extend_from_slice(&remaining[..grow]);
+            self.write = self.buffer.len() & self.ring_mask;
+            remaining = &remaining[grow..];
+        }
+
+        while !remaining.is_empty() {
+            let contiguous = remaining.len().min(self.ring_size - self.write);
+            let end = self.write + contiguous;
+            self.buffer[self.write..end].copy_from_slice(&remaining[..contiguous]);
+            self.write = end & self.ring_mask;
+            remaining = &remaining[contiguous..];
         }
     }
 
@@ -70,22 +92,50 @@ impl History {
         }
 
         let produced = count.min(output.len());
-        for slot in &mut output[..produced] {
-            let byte = self.byte_at_distance(distance);
-            *slot = byte;
-            self.push(byte);
+        if produced == 0 {
+            return Ok(0);
         }
+
+        let seed_len = produced.min(distance);
+        self.copy_history_prefix(distance, &mut output[..seed_len]);
+
+        let mut filled = seed_len;
+        while filled < produced {
+            let chunk = (produced - filled).min(filled);
+            output.copy_within(..chunk, filled);
+            filled += chunk;
+        }
+
+        self.push_slice(&output[..produced]);
         Ok(produced)
     }
 
-    fn byte_at_distance(&self, distance: usize) -> u8 {
-        debug_assert!(distance != 0);
+    fn copy_history_prefix(&self, distance: usize, output: &mut [u8]) {
+        debug_assert!(!output.is_empty());
+        debug_assert!(output.len() <= distance);
         debug_assert!(distance <= self.max_backward_distance());
 
         if self.buffer.len() < self.ring_size {
-            self.buffer[self.buffer.len() - distance]
+            let start = self.buffer.len() - distance;
+            output.copy_from_slice(&self.buffer[start..start + output.len()]);
+            return;
+        }
+
+        let start = (self.write + self.ring_size - distance) & self.ring_mask;
+        let first = output.len().min(self.ring_size - start);
+        output[..first].copy_from_slice(&self.buffer[start..start + first]);
+        if first < output.len() {
+            output[first..].copy_from_slice(&self.buffer[..output.len() - first]);
+        }
+    }
+
+    fn update_previous(&mut self, bytes: &[u8]) {
+        if bytes.len() == 1 {
+            self.second_previous = self.previous;
+            self.previous = bytes[0];
         } else {
-            self.buffer[(self.write + self.ring_size - distance) & self.ring_mask]
+            self.second_previous = bytes[bytes.len() - 2];
+            self.previous = bytes[bytes.len() - 1];
         }
     }
 
@@ -119,6 +169,17 @@ mod tests {
     }
 
     #[test]
+    fn bulk_push_tracks_context_bytes() {
+        let mut history = History::new(10);
+        history.push(b'x');
+        history.push_slice(b"a");
+        assert_eq!(history.previous_bytes(), (b'a', b'x'));
+
+        history.push_slice(b"bcdef");
+        assert_eq!(history.previous_bytes(), (b'f', b'e'));
+    }
+
+    #[test]
     fn copies_non_overlapping_history() {
         let mut history = History::new(10);
         history.push_slice(b"abcd");
@@ -137,6 +198,17 @@ mod tests {
 
         assert_eq!(history.copy_into(3, 8, &mut output), Ok(8));
         assert_eq!(&output, b"abcabcab");
+    }
+
+    #[test]
+    fn distance_one_copy_scales_without_per_byte_history_lookup() {
+        let mut history = History::new(10);
+        history.push(b'z');
+        let mut output = [0; 257];
+
+        assert_eq!(history.copy_into(1, output.len(), &mut output), Ok(257));
+        assert!(output.iter().all(|&byte| byte == b'z'));
+        assert_eq!(history.previous_bytes(), (b'z', b'z'));
     }
 
     #[test]
@@ -180,6 +252,33 @@ mod tests {
             assert_eq!(output[0], expected, "distance {distance}");
             model.push(expected);
         }
+    }
+
+    #[test]
+    fn bulk_push_wraps_without_changing_distance_semantics() {
+        let bytes = (0..2500_usize)
+            .map(|index| index.wrapping_mul(53) as u8)
+            .collect::<Vec<_>>();
+        let mut history = History::new(10);
+        history.push_slice(&bytes);
+
+        for distance in [1, 17, 511, 1008] {
+            let mut output = [0; 1];
+            history.copy_into(distance, 1, &mut output).unwrap();
+            assert_eq!(output[0], bytes[bytes.len() - distance]);
+        }
+    }
+
+    #[test]
+    fn overlapping_copy_reads_seed_across_ring_boundary() {
+        let bytes = (0..1100_usize).map(|index| index as u8).collect::<Vec<_>>();
+        let mut history = History::new(10);
+        history.push_slice(&bytes);
+        let mut output = [0; 64];
+        let distance = 100;
+
+        history.copy_into(distance, output.len(), &mut output).unwrap();
+        assert_eq!(&output[..], &bytes[bytes.len() - distance..bytes.len() - distance + 64]);
     }
 
     #[test]
