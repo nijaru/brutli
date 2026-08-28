@@ -166,7 +166,7 @@ mod tests {
         state.consume(&partition, 2);
 
         let mut bits = Bits::default();
-        bits.push(0b01, 2); // canonical symbol 1: most recent + 1
+        bits.push(0b10, 2); // canonical symbol 1: most recent + 1
         bits.push(2, 2); // block-length code 0 => 1 + extra = 3
         let input = bits.into_bytes();
         let mut reader = BitReader::default();
@@ -180,30 +180,35 @@ mod tests {
     }
 
     #[test]
-    fn retains_switch_while_waiting_for_length_bits() {
-        let partition = partition();
+    fn retains_type_switch_while_waiting_for_length_bits() {
+        let partition = BlockPartition {
+            num_types: 2,
+            type_code: Some(PrefixCode::single(1)),
+            length_code: Some(PrefixCode::single(25)),
+            first_length: Some(1),
+        };
         let mut state = BlockState::new(&partition);
-        state.consume(&partition, 2);
-
-        let mut bits = Bits::default();
-        bits.push(0b01, 2); // type symbol 1
-        bits.push(3, 2); // next length 4
-        let input = bits.into_bytes();
+        state.consume(&partition, 1);
 
         let mut reader = BitReader::default();
         let mut first_cursor = 0;
         assert_eq!(
-            state.current(&partition, &mut reader, &[], &mut first_cursor),
+            state.current(&partition, &mut reader, &[0x34], &mut first_cursor),
             None
         );
-        assert_eq!(first_cursor, 0);
+        assert_eq!(first_cursor, 1);
 
         let mut second_cursor = 0;
         assert_eq!(
-            state.current(&partition, &mut reader, &input, &mut second_cursor),
+            state.current(
+                &partition,
+                &mut reader,
+                &[0x12, 0, 0],
+                &mut second_cursor,
+            ),
             Some(1)
         );
-        assert_eq!(state.remaining(), Some(4));
+        assert_eq!(state.remaining(), Some(16625 + 0x1234));
     }
 
     #[test]
