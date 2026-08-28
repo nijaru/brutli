@@ -12,9 +12,9 @@ mod compressed_trees;
 mod context;
 mod context_map;
 mod decoder;
+mod dictionary;
 #[cfg(test)]
 mod differential_tests;
-mod dictionary;
 mod distance;
 mod history;
 mod metablock_header;
