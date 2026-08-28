@@ -13,6 +13,9 @@ publish = false
 
 [dependencies]
 
+[dev-dependencies]
+brotli = "8.0.4"
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
