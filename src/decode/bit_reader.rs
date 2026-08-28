@@ -30,9 +30,41 @@ impl BitReader {
             return None;
         }
 
-        let value = self.peek_bits(count);
+        let value = self.peek_buffered_bits(count);
         self.consume_bits(count);
         Some(value)
+    }
+
+    /// Peeks at `count` bits using both buffered bits and caller input without
+    /// advancing `cursor` or transferring input bytes into decoder state.
+    ///
+    /// This is intended for speculative lookup-table decoding: callers can
+    /// inspect a wider prefix and then commit only the bits actually belonging
+    /// to the decoded symbol with [`Self::read_bits`].
+    pub(super) fn peek_bits_from_input(
+        &self,
+        input: &[u8],
+        cursor: usize,
+        count: u32,
+    ) -> Option<u64> {
+        assert!(count <= Self::MAX_READ_BITS);
+
+        if self.buffered >= count {
+            return Some(self.peek_buffered_bits(count));
+        }
+
+        let mut value = self.buffer;
+        let mut available = self.buffered;
+        let mut input_cursor = cursor;
+        while available < count {
+            let byte = *input.get(input_cursor)?;
+            value |= u64::from(byte) << available;
+            available += 8;
+            input_cursor += 1;
+        }
+
+        let mask = if count == 0 { 0 } else { (1_u64 << count) - 1 };
+        Some(value & mask)
     }
 
     /// Refills the staging buffer until at least `count` bits are available.
@@ -40,7 +72,7 @@ impl BitReader {
     /// Returning `false` does not discard already-buffered bits. Bytes that
     /// were available in `input` are retained in the staging buffer so a
     /// smaller read or a later call can still consume them.
-    pub(super) fn ensure_bits(&mut self, input: &[u8], cursor: &mut usize, count: u32) -> bool {
+    fn ensure_bits(&mut self, input: &[u8], cursor: &mut usize, count: u32) -> bool {
         assert!(count <= Self::MAX_READ_BITS);
 
         while self.buffered < count {
@@ -56,7 +88,7 @@ impl BitReader {
     }
 
     /// Returns the next `count` buffered bits without consuming them.
-    pub(super) fn peek_bits(&self, count: u32) -> u64 {
+    fn peek_buffered_bits(&self, count: u32) -> u64 {
         debug_assert!(count <= self.buffered);
         debug_assert!(count <= Self::MAX_READ_BITS);
         if count == 0 {
@@ -67,7 +99,7 @@ impl BitReader {
     }
 
     /// Discards `count` bits from the front of the staging buffer.
-    pub(super) fn consume_bits(&mut self, count: u32) {
+    fn consume_bits(&mut self, count: u32) {
         debug_assert!(count <= self.buffered);
         self.buffer >>= count;
         self.buffered -= count;
@@ -145,19 +177,21 @@ mod tests {
     }
 
     #[test]
-    fn peeks_and_consumes_without_reloading() {
+    fn speculative_peek_does_not_consume_input() {
         let mut reader = BitReader::default();
         let mut cursor = 0;
 
-        assert!(reader.ensure_bits(&[0b1101_0010], &mut cursor, 8));
+        assert_eq!(reader.read_bits(&[0b1010_0101], &mut cursor, 3), Some(0b101));
         assert_eq!(cursor, 1);
-        assert_eq!(reader.peek_bits(4), 0b0010);
-        assert_eq!(reader.peek_bits(8), 0b1101_0010);
-        assert_eq!(reader.buffered_bits(), 8);
-
-        reader.consume_bits(3);
-        assert_eq!(reader.peek_bits(5), 0b11010);
         assert_eq!(reader.buffered_bits(), 5);
+
+        let following = [0b1100_0011];
+        assert_eq!(
+            reader.peek_bits_from_input(&following, 0, 8),
+            Some(0b0110_1000)
+        );
+        assert_eq!(reader.buffered_bits(), 5);
+        assert_eq!(reader.read_bits(&following, &mut 0, 5), Some(0b10100));
     }
 
     #[test]
@@ -165,7 +199,7 @@ mod tests {
         let mut reader = BitReader::default();
         let mut cursor = 0;
 
-        assert!(!reader.ensure_bits(&[0b1010_0101], &mut cursor, 12));
+        assert_eq!(reader.read_bits(&[0b1010_0101], &mut cursor, 12), None);
         assert_eq!(cursor, 1);
         assert_eq!(reader.read_bits(&[], &mut cursor, 3), Some(0b101));
         assert_eq!(reader.buffered_bits(), 5);
