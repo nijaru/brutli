@@ -4,6 +4,7 @@ mod bit_reader;
 mod block_partition;
 mod complex_prefix_code;
 mod compressed_header;
+mod compressed_trees;
 mod context_map;
 mod decoder;
 mod metablock_header;
