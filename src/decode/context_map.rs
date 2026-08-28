@@ -6,7 +6,6 @@ use super::prefix_code_decoder::{PrefixCodeDecoder, PrefixCodeDecoderError};
 pub(super) enum ContextMapError {
     PrefixCode(PrefixCodeDecoderError),
     RepeatOverflow,
-    MissingTree,
 }
 
 impl From<PrefixCodeDecoderError> for ContextMapError {
@@ -138,7 +137,6 @@ impl ContextMapDecoder {
                     if bit != 0 {
                         inverse_move_to_front(&mut self.map);
                     }
-                    self.validate_tree_set()?;
                     self.state = State::Done;
                     return Ok(Some(core::mem::take(&mut self.map)));
                 }
@@ -150,26 +148,6 @@ impl ContextMapDecoder {
     fn initialize_prefix_decoder(&mut self) {
         let alphabet_size = self.num_trees + u16::from(self.rle_max);
         self.prefix_decoder = Some(PrefixCodeDecoder::new(alphabet_size));
-    }
-
-    fn validate_tree_set(&self) -> Result<(), ContextMapError> {
-        let mut seen = [false; 256];
-        for &tree in &self.map {
-            let index = usize::from(tree);
-            if index >= usize::from(self.num_trees) {
-                return Err(ContextMapError::MissingTree);
-            }
-            seen[index] = true;
-        }
-
-        if seen[..usize::from(self.num_trees)]
-            .iter()
-            .all(|&value| value)
-        {
-            Ok(())
-        } else {
-            Err(ContextMapError::MissingTree)
-        }
     }
 }
 
@@ -253,6 +231,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(map, [0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn allows_declared_trees_that_are_unused_by_the_map() {
+        let mut bits = Bits::default();
+        bits.push(0, 1); // RLEMAX = 0
+        bits.simple_code(&[0, 1], 2);
+        for value in [0, 1, 0, 1] {
+            bits.push_prefix(value, 1);
+        }
+        bits.push(0, 1); // no inverse MTF
+        let input = bits.into_bytes();
+
+        let mut decoder = ContextMapDecoder::new(4, 3);
+        let mut reader = BitReader::default();
+        let mut cursor = 0;
+        let map = decoder
+            .decode(&mut reader, &input, &mut cursor)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(map, [0, 1, 0, 1]);
     }
 
     #[test]
