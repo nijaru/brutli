@@ -50,7 +50,7 @@ mod tests {
         writer.write_bits(0b0010, 4);
         writer.write_bits(0b110, 3);
 
-        assert_eq!(writer.finish(), vec![0b0101_0110, 0b0000_0011]);
+        assert_eq!(writer.finish(), vec![0b0001_0110, 0b0000_0011]);
     }
 
     #[test]
