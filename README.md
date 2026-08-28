@@ -101,7 +101,7 @@ Run the normal validation with:
 
 ```text
 cargo test --all-features
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## Benchmarks
@@ -112,9 +112,17 @@ The decoder benchmark compares Brutli with the official Google Brotli C decoder 
 cargo bench --bench decode
 ```
 
-The harness validates every fixture before timing and reports decoded-byte throughput for multiple API shapes: Brutli's direct incremental core, one-shot helper, and `Read` adapter; the official Google Brotli `BrotliDecoderDecompress` path; and `rust-brotli`'s direct `brotli_decode`, `Decompressor`, and `BrotliDecompress` paths.
+The harness validates every fixture before timing and reports decoded-byte throughput for multiple API shapes: Brutli's direct incremental core with both whole-output and 8 KiB output slices, one-shot helper, and `Read` adapter; the official Google Brotli `BrotliDecoderDecompress` path; and `rust-brotli`'s direct `brotli_decode`, `Decompressor`, and `BrotliDecompress` paths.
 
 GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. The next performance phase is controlled local profiling and benchmarking against both `rust-brotli` and the official Google Brotli decoder, including CPU counters and allocation/memory measurements.
+
+On Linux with `perf` installed, the reproducible profiling helper runs CPU-counter comparisons for all three Brutli fixtures plus the direct Google/rust-brotli binary comparators, then records a call graph for Brutli's binary path:
+
+```text
+bash scripts/profile-decode.sh
+```
+
+It writes `perf-brutli-binary.data` and a text report at `perf-brutli-binary.txt`. `PERF_RUNS`, `SAMPLE_COUNT`, `SAMPLE_SIZE`, and `RECORD_SAMPLE_SIZE` can be overridden in the environment when a longer or shorter profile is desired.
 
 ## Non-goals for the initial decoder
 
