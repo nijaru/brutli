@@ -31,9 +31,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Pushes get a bounded smoke campaign; the scheduled run explores longer.
+          # Pushes get bounded smoke campaigns; the scheduled run explores longer.
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            cargo fuzz run decode -- -max_total_time=300
+            cargo fuzz run decode -- -max_total_time=240
+            cargo fuzz run encode_roundtrip -- -max_total_time=60
           else
             cargo fuzz run decode -- -runs=10000
+            cargo fuzz run encode_roundtrip -- -runs=5000
           fi
