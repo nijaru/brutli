@@ -1,9 +1,12 @@
 const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
+const BUCKET_SIZE: usize = 4;
 const MIN_MATCH: usize = 4;
 const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
 const EMPTY: u32 = u32::MAX;
+
+type MatchBucket = [u32; BUCKET_SIZE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MatchCommand {
@@ -32,31 +35,21 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         };
     }
 
-    let mut table = vec![EMPTY; TABLE_SIZE];
+    let mut table = vec![[EMPTY; BUCKET_SIZE]; TABLE_SIZE];
     let mut commands = Vec::new();
     let mut position = 0_usize;
     let mut literal_start = 0_usize;
 
     while position + MIN_MATCH <= input.len() {
         let key = hash4(input, position);
-        let previous = table[key];
-        table[key] = position as u32;
-        let previous_position = previous as usize;
+        let candidates = table[key];
+        insert_position(&mut table[key], position as u32);
 
-        let match_length = if previous != EMPTY
-            && position - previous_position <= MAX_BACKWARD_DISTANCE
-            && input[previous_position..previous_position + MIN_MATCH]
-                == input[position..position + MIN_MATCH]
-        {
-            extend_match(input, previous_position, position)
-        } else {
-            0
-        };
-
-        if match_length < MIN_MATCH {
+        let Some((previous_position, match_length)) = best_match(input, position, &candidates)
+        else {
             position += 1;
             continue;
-        }
+        };
 
         commands.push(MatchCommand {
             insert_start: literal_start,
@@ -68,7 +61,8 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         let end = position + match_length;
         for skipped in position + 1..end {
             if skipped + MIN_MATCH <= input.len() {
-                table[hash4(input, skipped)] = skipped as u32;
+                let bucket = &mut table[hash4(input, skipped)];
+                insert_position(bucket, skipped as u32);
             }
         }
         position = end;
@@ -79,6 +73,44 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         commands,
         tail_start: literal_start,
     }
+}
+
+fn best_match(input: &[u8], position: usize, candidates: &MatchBucket) -> Option<(usize, usize)> {
+    let mut best_position = 0_usize;
+    let mut best_length = 0_usize;
+
+    for &previous in candidates {
+        if previous == EMPTY {
+            continue;
+        }
+        let previous_position = previous as usize;
+        if position - previous_position > MAX_BACKWARD_DISTANCE
+            || input[previous_position..previous_position + MIN_MATCH]
+                != input[position..position + MIN_MATCH]
+        {
+            continue;
+        }
+
+        let match_length = extend_match(input, previous_position, position);
+        if match_length > best_length
+            || (match_length == best_length && previous_position > best_position)
+        {
+            best_position = previous_position;
+            best_length = match_length;
+        }
+    }
+
+    (best_length >= MIN_MATCH).then_some((best_position, best_length))
+}
+
+fn insert_position(bucket: &mut MatchBucket, position: u32) {
+    let mut replace = 0;
+    for index in 1..BUCKET_SIZE {
+        if bucket[replace] != EMPTY && (bucket[index] == EMPTY || bucket[index] < bucket[replace]) {
+            replace = index;
+        }
+    }
+    bucket[replace] = position;
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {
@@ -119,7 +151,7 @@ fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{extend_match, greedy_parse};
+    use super::{EMPTY, best_match, extend_match, greedy_parse, insert_position};
 
     #[test]
     fn finds_repeated_phrase() {
@@ -149,6 +181,27 @@ mod tests {
         let parse = greedy_parse(b"abcdefghijklmno");
         assert!(parse.commands.is_empty());
         assert_eq!(parse.tail_start, 0);
+    }
+
+    #[test]
+    fn bucket_keeps_four_most_recent_positions() {
+        let mut bucket = [EMPTY; 4];
+        for position in [9, 2, 7, 4, 12, 10] {
+            insert_position(&mut bucket, position);
+        }
+        bucket.sort_unstable();
+        assert_eq!(bucket, [7, 9, 10, 12]);
+    }
+
+    #[test]
+    fn selects_longest_candidate_then_nearest_tie() {
+        let source = b"abcdWXYZabcdQRSTabcdWXYZ";
+        let candidates = [0, 8, EMPTY, EMPTY];
+        assert_eq!(best_match(source, 16, &candidates), Some((0, 8)));
+
+        let tied = b"abcdxxxxabcdyyyyabcdzzzz";
+        let candidates = [0, 8, EMPTY, EMPTY];
+        assert_eq!(best_match(tied, 16, &candidates), Some((8, 4)));
     }
 
     #[test]
