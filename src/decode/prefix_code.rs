@@ -1,6 +1,8 @@
 use super::bit_reader::BitReader;
 
 const MAX_CODE_BITS: usize = 15;
+const FAST_BITS: u8 = 8;
+const FAST_SIZE: usize = 1 << FAST_BITS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PrefixCodeError {
@@ -51,12 +53,23 @@ impl PrefixCode {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FastEntry {
+    symbol: u16,
+    bits: u8,
+}
+
+impl FastEntry {
+    const EMPTY: Self = Self { symbol: 0, bits: 0 };
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CanonicalCode {
     counts: [u16; MAX_CODE_BITS + 1],
     first_code: [u16; MAX_CODE_BITS + 1],
     first_symbol: [u16; MAX_CODE_BITS + 1],
     symbols: Vec<u16>,
+    fast: Box<[FastEntry; FAST_SIZE]>,
     max_len: u8,
 }
 
@@ -113,11 +126,14 @@ impl CanonicalCode {
             }
         }
 
+        let fast = build_fast_table(lengths, &first_code);
+
         Ok(Self {
             counts,
             first_code,
             first_symbol,
             symbols,
+            fast,
             max_len,
         })
     }
@@ -129,6 +145,14 @@ impl CanonicalCode {
         input: &[u8],
         cursor: &mut usize,
     ) -> Option<u16> {
+        if state.length == 0 && reader.ensure_bits(input, cursor, u32::from(FAST_BITS)) {
+            let entry = self.fast[reader.peek_bits(u32::from(FAST_BITS)) as usize];
+            if entry.bits != 0 {
+                reader.consume_bits(u32::from(entry.bits));
+                return Some(entry.symbol);
+            }
+        }
+
         loop {
             let bit = reader.read_bits(input, cursor, 1)? as u16;
             state.code = (state.code << 1) | bit;
@@ -147,6 +171,44 @@ impl CanonicalCode {
             debug_assert!(state.length < self.max_len);
         }
     }
+}
+
+fn build_fast_table(
+    lengths: &[u8],
+    first_code: &[u16; MAX_CODE_BITS + 1],
+) -> Box<[FastEntry; FAST_SIZE]> {
+    let mut table = Box::new([FastEntry::EMPTY; FAST_SIZE]);
+    let mut next_code = *first_code;
+
+    for (symbol, &length) in lengths.iter().enumerate() {
+        if length == 0 {
+            continue;
+        }
+
+        let length_index = usize::from(length);
+        let code = next_code[length_index];
+        next_code[length_index] += 1;
+
+        if length > FAST_BITS {
+            continue;
+        }
+
+        let reversed = reverse_low_bits(code, length);
+        let repetitions = 1_usize << (FAST_BITS - length);
+        for suffix in 0..repetitions {
+            let index = usize::from(reversed) | (suffix << length);
+            table[index] = FastEntry {
+                symbol: symbol as u16,
+                bits: length,
+            };
+        }
+    }
+
+    table
+}
+
+fn reverse_low_bits(value: u16, count: u8) -> u16 {
+    value.reverse_bits() >> (u16::BITS as u8 - count)
 }
 
 #[derive(Debug, Default)]
@@ -222,6 +284,22 @@ mod tests {
     }
 
     #[test]
+    fn long_code_uses_canonical_fallback() {
+        let code = PrefixCode::from_code_lengths(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 9]).unwrap();
+        let mut bits = Bits::default();
+        bits.push_prefix(0b1_1111_1111, 9);
+        let input = bits.into_bytes();
+        let mut reader = BitReader::default();
+        let mut state = PrefixSymbolDecoder::default();
+        let mut cursor = 0;
+
+        assert_eq!(
+            code.decode(&mut state, &mut reader, &input, &mut cursor),
+            Some(9)
+        );
+    }
+
+    #[test]
     fn single_symbol_consumes_no_bits() {
         let code = PrefixCode::single(42);
         let mut reader = BitReader::default();
@@ -266,6 +344,19 @@ mod tests {
         assert_eq!(
             code.decode(&mut state, &mut reader, &input[1..], &mut second_cursor),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn short_code_decodes_when_fast_refill_cannot_reach_eight_bits() {
+        let code = PrefixCode::from_code_lengths(&[1, 2, 3, 3]).unwrap();
+        let mut reader = BitReader::default();
+        let mut state = PrefixSymbolDecoder::default();
+        let mut cursor = 0;
+
+        assert_eq!(
+            code.decode(&mut state, &mut reader, &[0], &mut cursor),
+            Some(0)
         );
     }
 
