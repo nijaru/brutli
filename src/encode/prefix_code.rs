@@ -72,6 +72,22 @@ impl PrefixEncoding {
         })
     }
 
+    pub(super) fn data_bits(&self, frequencies: &[usize]) -> usize {
+        debug_assert_eq!(self.codes.len(), frequencies.len());
+        frequencies
+            .iter()
+            .zip(&self.codes)
+            .map(|(&frequency, code)| {
+                if frequency == 0 {
+                    0
+                } else {
+                    frequency
+                        * usize::from(code.expect("used symbol exists in prefix code").bits)
+                }
+            })
+            .sum()
+    }
+
     pub(super) fn write_tree(&self, writer: &mut BitWriter, alphabet_size: u16) {
         debug_assert_eq!(self.codes.len(), usize::from(alphabet_size));
         if self.symbols.len() <= 4 {
@@ -373,6 +389,7 @@ mod tests {
         assert_eq!(code.lengths[2], 2);
         assert_eq!(code.lengths[3], 3);
         assert_eq!(code.lengths[4], 3);
+        assert_eq!(code.data_bits(&frequencies), 112);
     }
 
     #[test]
