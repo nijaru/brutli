@@ -130,7 +130,6 @@ impl QualityFiveHasher {
             }
         }
 
-        let comparison_length = best_length.max(3);
         let oldest = count.saturating_sub(BLOCK_SIZE);
         for index in (oldest..count).rev() {
             let previous = self.buckets[bucket_start + (index & BLOCK_MASK)] as usize;
@@ -140,6 +139,7 @@ impl QualityFiveHasher {
                 break;
             }
 
+            let comparison_length = best_length.max(3);
             if comparison_length < max_length {
                 let compare_at = comparison_length - 3;
                 if input[position + compare_at..position + compare_at + 4]
