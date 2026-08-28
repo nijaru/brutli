@@ -1,11 +1,31 @@
 mod bit_writer;
+mod command;
+mod prefix_code;
 
 use bit_writer::BitWriter;
+use command::InsertCommand;
+use prefix_code::{write_simple_prefix_code, write_simple_symbol, write_var_len_u8};
 
 const DEFAULT_WINDOW_BITS: u8 = 22;
 const MAX_META_BLOCK_SIZE: usize = 1 << 24;
+const LITERAL_ALPHABET_SIZE: u16 = 256;
+const COMMAND_ALPHABET_SIZE: u16 = 704;
+const DISTANCE_ALPHABET_SIZE: u16 = 64;
 
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
+    let stored = compress_stored(input);
+    let Some(compressed) = try_simple_compressed(input) else {
+        return stored;
+    };
+
+    if compressed.len() < stored.len() {
+        compressed
+    } else {
+        stored
+    }
+}
+
+fn compress_stored(input: &[u8]) -> Vec<u8> {
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
 
@@ -15,6 +35,57 @@ pub(super) fn compress(input: &[u8]) -> Vec<u8> {
 
     write_final_empty_metablock(&mut writer);
     writer.finish()
+}
+
+fn try_simple_compressed(input: &[u8]) -> Option<Vec<u8>> {
+    if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
+        return None;
+    }
+
+    let symbols = simple_literal_alphabet(input)?;
+    let command = InsertCommand::for_length(input.len());
+
+    let mut writer = BitWriter::default();
+    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_final_compressed_header(&mut writer, input.len());
+    write_simple_compressed_header(&mut writer);
+
+    write_simple_prefix_code(&mut writer, &symbols, LITERAL_ALPHABET_SIZE);
+    write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
+    write_simple_prefix_code(&mut writer, &[0], DISTANCE_ALPHABET_SIZE);
+
+    command.write_extra(&mut writer);
+    for &byte in input {
+        let index = symbols
+            .binary_search(&u16::from(byte))
+            .expect("literal alphabet was built from the input");
+        write_simple_symbol(&mut writer, index, symbols.len());
+    }
+
+    Some(writer.finish())
+}
+
+fn simple_literal_alphabet(input: &[u8]) -> Option<Vec<u16>> {
+    let mut used = [false; 256];
+    let mut count = 0_usize;
+
+    for &byte in input {
+        let slot = &mut used[usize::from(byte)];
+        if !*slot {
+            *slot = true;
+            count += 1;
+            if count > 4 {
+                return None;
+            }
+        }
+    }
+
+    Some(
+        used.into_iter()
+            .enumerate()
+            .filter_map(|(symbol, present)| present.then_some(symbol as u16))
+            .collect(),
+    )
 }
 
 fn write_window_bits(writer: &mut BitWriter, window_bits: u8) {
@@ -36,6 +107,27 @@ fn write_window_bits(writer: &mut BitWriter, window_bits: u8) {
         }
         _ => panic!("RFC 7932 window bits must be in 10..=24"),
     }
+}
+
+fn write_final_compressed_header(writer: &mut BitWriter, length: usize) {
+    assert!((1..=MAX_META_BLOCK_SIZE).contains(&length));
+
+    writer.write_bits(1, 1); // ISLAST
+    writer.write_bits(0, 1); // ISLASTEMPTY
+    let nibbles = nibbles_for_length(length);
+    writer.write_bits(u64::from(nibbles - 4), 2); // MNIBBLES
+    writer.write_bits((length - 1) as u64, nibbles * 4); // MLEN - 1
+}
+
+fn write_simple_compressed_header(writer: &mut BitWriter) {
+    write_var_len_u8(writer, 0); // one literal block type
+    write_var_len_u8(writer, 0); // one insert-and-copy block type
+    write_var_len_u8(writer, 0); // one distance block type
+    writer.write_bits(0, 2); // NPOSTFIX
+    writer.write_bits(0, 4); // NDIRECT
+    writer.write_bits(0, 2); // literal context mode
+    write_var_len_u8(writer, 0); // one literal tree
+    write_var_len_u8(writer, 0); // one distance tree
 }
 
 fn write_uncompressed_metablock(writer: &mut BitWriter, input: &[u8]) {
@@ -68,7 +160,10 @@ fn nibbles_for_length(length: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_META_BLOCK_SIZE, compress, nibbles_for_length};
+    use super::{
+        MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length,
+        simple_literal_alphabet,
+    };
     use crate::{DecodeError, Decoder, decompress};
 
     #[test]
@@ -85,7 +180,21 @@ mod tests {
     }
 
     #[test]
-    fn reference_decoder_accepts_output() {
+    fn simple_compressed_stream_round_trips() {
+        for source in [
+            b"aaaaaaaaaaaaaaaa".as_slice(),
+            b"abababababababab".as_slice(),
+            b"abcabcabcabcabca".as_slice(),
+            b"abcdabcdabcdabcd".as_slice(),
+        ] {
+            let encoded = compress(source);
+            assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+            assert!(encoded.len() < compress_stored(source).len());
+        }
+    }
+
+    #[test]
+    fn reference_decoder_accepts_stored_output() {
         let source = b"standards-compliant Brotli output from Brutli".repeat(1024);
         let encoded = compress(&source);
         let mut decoded = vec![0_u8; source.len() + 1];
@@ -100,9 +209,33 @@ mod tests {
     }
 
     #[test]
-    fn crosses_four_nibble_length_boundary() {
+    fn reference_decoder_accepts_compressed_output() {
+        let source = b"abcd".repeat(4096);
+        let encoded = compress(&source);
+        assert!(encoded.len() < source.len());
+
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
+        assert!(matches!(
+            info.result,
+            brotli_decompressor::BrotliResult::ResultSuccess
+        ));
+        assert_eq!(info.decoded_size, source.len());
+        assert_eq!(&decoded[..info.decoded_size], source);
+    }
+
+    #[test]
+    fn stored_encoder_crosses_four_nibble_length_boundary() {
+        let source = vec![0xa5; 0x1_0001];
+        let encoded = compress_stored(&source);
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn compressed_encoder_crosses_four_nibble_length_boundary() {
         let source = vec![0xa5; 0x1_0001];
         let encoded = compress(&source);
+        assert!(encoded.len() < source.len());
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
@@ -119,6 +252,12 @@ mod tests {
                 max_window_bits: 21,
             })
         );
+    }
+
+    #[test]
+    fn simple_alphabet_rejects_five_symbols() {
+        assert_eq!(simple_literal_alphabet(b"abcde"), None);
+        assert_eq!(simple_literal_alphabet(b"dcba"), Some(vec![97, 98, 99, 100]));
     }
 
     #[test]
