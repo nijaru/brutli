@@ -1,5 +1,7 @@
 use super::{DIRECT_DISTANCE_CODES, command::ExplicitCommand, distance::DistanceCode};
 
+mod dictionary;
+
 const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
 const BUCKET_SIZE: usize = 2;
@@ -7,6 +9,7 @@ const MIN_MATCH: usize = 4;
 const MAX_LAZY_MATCH: usize = 16;
 const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
+const MAX_DICTIONARY_MATCH: usize = 24;
 const LITERAL_BIT_ESTIMATE: isize = 8;
 const EMPTY: u32 = u32::MAX;
 
@@ -18,12 +21,20 @@ pub(super) struct MatchCommand {
     pub(super) insert_length: usize,
     pub(super) copy_length: usize,
     pub(super) distance: usize,
+    pub(super) is_dictionary: bool,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct Parse {
     pub(super) commands: Vec<MatchCommand>,
     pub(super) tail_start: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Candidate {
+    copy_length: usize,
+    distance: usize,
+    is_dictionary: bool,
 }
 
 pub(super) fn greedy_parse(input: &[u8]) -> Parse {
@@ -50,21 +61,13 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         let candidates = table[key];
         insert_position(&mut table[key], &mut cursors[key], position as u32);
 
-        let Some((previous_position, match_length)) = best_match(input, position, &candidates)
-        else {
+        let Some(candidate) = best_candidate(input, position, literal_start, &candidates) else {
             position += 1;
             continue;
         };
 
-        if match_length <= MAX_LAZY_MATCH
-            && should_defer_match(
-                input,
-                position,
-                literal_start,
-                previous_position,
-                match_length,
-                &table,
-            )
+        if candidate.copy_length <= MAX_LAZY_MATCH
+            && should_defer_match(input, position, literal_start, candidate, &table)
         {
             position += 1;
             continue;
@@ -73,11 +76,12 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         commands.push(MatchCommand {
             insert_start: literal_start,
             insert_length: position - literal_start,
-            copy_length: match_length,
-            distance: position - previous_position,
+            copy_length: candidate.copy_length,
+            distance: candidate.distance,
+            is_dictionary: candidate.is_dictionary,
         });
 
-        let end = position + match_length;
+        let end = position + candidate.copy_length;
         for skipped in position + 1..end {
             if skipped + MIN_MATCH <= input.len() {
                 let key = hash4(input, skipped);
@@ -98,8 +102,7 @@ fn should_defer_match(
     input: &[u8],
     position: usize,
     literal_start: usize,
-    previous_position: usize,
-    match_length: usize,
+    current: Candidate,
     table: &[MatchBucket],
 ) -> bool {
     let next_position = position + 1;
@@ -108,20 +111,73 @@ fn should_defer_match(
     }
 
     let next_candidates = table[hash4(input, next_position)];
-    let Some((next_previous, next_length)) = best_match(input, next_position, &next_candidates)
-    else {
+    let Some(next) = best_candidate(input, next_position, literal_start, &next_candidates) else {
         return false;
     };
 
     let insert_length = position - literal_start;
-    let current_gain =
-        estimated_match_gain(insert_length, match_length, position - previous_position);
+    let current_gain = estimated_match_gain(insert_length, current.copy_length, current.distance);
     let next_gain = estimated_match_gain(
         insert_length + 1,
-        next_length,
-        next_position - next_previous,
+        next.copy_length,
+        next.distance,
     ) - LITERAL_BIT_ESTIMATE;
     next_gain > current_gain
+}
+
+fn best_candidate(
+    input: &[u8],
+    position: usize,
+    literal_start: usize,
+    candidates: &MatchBucket,
+) -> Option<Candidate> {
+    let lz77 = best_match(input, position, candidates).map(|(previous, copy_length)| Candidate {
+        copy_length,
+        distance: position - previous,
+        is_dictionary: false,
+    });
+    if lz77.is_some_and(|candidate| candidate.copy_length > MAX_DICTIONARY_MATCH) {
+        return lz77;
+    }
+
+    let dictionary = dictionary::best_identity_match(
+        input,
+        position,
+        position.min(MAX_BACKWARD_DISTANCE),
+    )
+    .map(|matched| Candidate {
+        copy_length: matched.length,
+        distance: matched.distance,
+        is_dictionary: true,
+    });
+
+    choose_candidate(position - literal_start, lz77, dictionary)
+}
+
+fn choose_candidate(
+    insert_length: usize,
+    lz77: Option<Candidate>,
+    dictionary: Option<Candidate>,
+) -> Option<Candidate> {
+    match (lz77, dictionary) {
+        (None, None) => None,
+        (Some(candidate), None) | (None, Some(candidate)) => Some(candidate),
+        (Some(lz77), Some(dictionary)) => {
+            let lz77_gain = estimated_match_gain(insert_length, lz77.copy_length, lz77.distance);
+            let dictionary_gain = estimated_match_gain(
+                insert_length,
+                dictionary.copy_length,
+                dictionary.distance,
+            );
+            if dictionary_gain > lz77_gain
+                || (dictionary_gain == lz77_gain && dictionary.copy_length > lz77.copy_length)
+            {
+                Some(dictionary)
+            } else {
+                Some(lz77)
+            }
+        }
+    }
 }
 
 fn estimated_match_gain(insert_length: usize, copy_length: usize, distance: usize) -> isize {
@@ -218,6 +274,7 @@ mod tests {
         assert_eq!(first.insert_start, 0);
         assert_eq!(first.insert_length, 7);
         assert_eq!(first.distance, 7);
+        assert!(!first.is_dictionary);
         assert!(first.copy_length >= 7);
     }
 
@@ -228,7 +285,18 @@ mod tests {
         assert_eq!(parse.commands[0].insert_length, 1);
         assert_eq!(parse.commands[0].copy_length, 15);
         assert_eq!(parse.commands[0].distance, 1);
+        assert!(!parse.commands[0].is_dictionary);
         assert_eq!(parse.tail_start, 16);
+    }
+
+    #[test]
+    fn finds_static_dictionary_identity_word() {
+        let parse = greedy_parse(b"timeXYZQ");
+        assert!(!parse.commands.is_empty());
+        assert_eq!(parse.commands[0].insert_length, 0);
+        assert_eq!(parse.commands[0].copy_length, 4);
+        assert_eq!(parse.commands[0].distance, 1);
+        assert!(parse.commands[0].is_dictionary);
     }
 
     #[test]

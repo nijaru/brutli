@@ -34,7 +34,11 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
 
     for parsed in parse.commands {
         let command = ExplicitCommand::for_lengths(parsed.insert_length, parsed.copy_length);
-        let distance = recent_distances.encode(parsed.distance, DIRECT_DISTANCE_CODES);
+        let distance = if parsed.is_dictionary {
+            DistanceCode::for_distance(parsed.distance, DIRECT_DISTANCE_CODES)
+        } else {
+            recent_distances.encode(parsed.distance, DIRECT_DISTANCE_CODES)
+        };
         command_frequencies[usize::from(command.symbol)] += 1;
         distance_frequencies[usize::from(distance.symbol)] += 1;
         count_literals(
@@ -125,10 +129,32 @@ mod tests {
     }
 
     #[test]
+    fn identity_dictionary_stream_round_trips() {
+        let source = b"timeXYZQ";
+        let encoded = try_compress(source).unwrap();
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
     fn reference_decoder_accepts_greedy_output() {
         let source = b"general greedy LZ77 should interoperate with the Brotli reference decoder. "
             .repeat(128);
         let encoded = try_compress(&source).unwrap();
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
+
+        assert!(matches!(
+            info.result,
+            brotli_decompressor::BrotliResult::ResultSuccess
+        ));
+        assert_eq!(info.decoded_size, source.len());
+        assert_eq!(&decoded[..info.decoded_size], source);
+    }
+
+    #[test]
+    fn reference_decoder_accepts_identity_dictionary_output() {
+        let source = b"timeXYZQ";
+        let encoded = try_compress(source).unwrap();
         let mut decoded = vec![0_u8; source.len() + 1];
         let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
 
