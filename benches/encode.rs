@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Read;
 use std::sync::LazyLock;
 
@@ -34,6 +35,11 @@ static TEXT: LazyLock<Case> = LazyLock::new(|| {
 static REPETITIVE: LazyLock<Case> =
     LazyLock::new(|| Case::new(b"abc123abc123abc123abc123".repeat(4096)));
 
+static HTML: LazyLock<Case> = LazyLock::new(|| Case::new(generated_html()));
+static JSON: LazyLock<Case> = LazyLock::new(|| Case::new(generated_json()));
+static JAVASCRIPT: LazyLock<Case> = LazyLock::new(|| Case::new(generated_javascript()));
+static STRUCTURED_BINARY: LazyLock<Case> = LazyLock::new(|| Case::new(generated_structured_binary()));
+
 static BINARY: LazyLock<Case> = LazyLock::new(|| {
     let mut source = Vec::with_capacity(64 * 1024);
     let mut state = 0x243f_6a88_u32;
@@ -49,8 +55,87 @@ static BINARY: LazyLock<Case> = LazyLock::new(|| {
 fn main() {
     print_ratio("text", &TEXT);
     print_ratio("repetitive", &REPETITIVE);
+    print_ratio("html", &HTML);
+    print_ratio("json", &JSON);
+    print_ratio("javascript", &JAVASCRIPT);
+    print_ratio("structured_binary", &STRUCTURED_BINARY);
     print_ratio("binary", &BINARY);
     divan::main();
+}
+
+fn generated_html() -> Vec<u8> {
+    let mut source = String::with_capacity(96 * 1024);
+    source.push_str("<!doctype html><html><head><meta charset=\"utf-8\"><title>Brutli benchmark</title></head><body><main>\n");
+    for section in 0..512 {
+        let class = section % 7;
+        let score = (section * 17) % 1000;
+        writeln!(
+            source,
+            "<section class=\"card group-{class}\" data-index=\"{section}\"><h2>Benchmark item {section}</h2><p>This generated document contains repeated HTML structure with changing identifiers, labels, and values.</p><a href=\"/items/{section}?score={score}\">Open item</a></section>"
+        )
+        .unwrap();
+    }
+    source.push_str("</main></body></html>");
+    source.into_bytes()
+}
+
+fn generated_json() -> Vec<u8> {
+    let mut source = String::with_capacity(96 * 1024);
+    source.push_str("{\"version\":1,\"items\":[");
+    for item in 0..768 {
+        if item != 0 {
+            source.push(',');
+        }
+        let group = item % 11;
+        let active = item % 3 != 0;
+        let score = (item * 7919) % 100_000;
+        write!(
+            source,
+            "{{\"id\":{item},\"group\":\"group-{group}\",\"active\":{active},\"score\":{score},\"name\":\"generated benchmark item {item}\",\"tags\":[\"brotli\",\"rust\",\"group-{group}\"]}}"
+        )
+        .unwrap();
+    }
+    source.push_str("]}");
+    source.into_bytes()
+}
+
+fn generated_javascript() -> Vec<u8> {
+    let mut source = String::with_capacity(96 * 1024);
+    source.push_str("export const records = [];\n");
+    for item in 0..640 {
+        let group = item % 13;
+        writeln!(
+            source,
+            "records.push({{id:{item}, group:'group-{group}', value:{}, label:'generated-item-{item}'}});",
+            item * 31
+        )
+        .unwrap();
+        writeln!(
+            source,
+            "if (records[{item}].value % 2 === 0) {{ records[{item}].label = records[{item}].label.toUpperCase(); }}"
+        )
+        .unwrap();
+    }
+    source.push_str("export function total(){ return records.reduce((sum, item) => sum + item.value, 0); }\n");
+    source.into_bytes()
+}
+
+fn generated_structured_binary() -> Vec<u8> {
+    let mut source = Vec::with_capacity(96 * 1024);
+    let mut state = 0x9e37_79b9_u32;
+    for record in 0_u32..2048 {
+        source.extend_from_slice(b"BRUT");
+        source.extend_from_slice(&record.to_le_bytes());
+        source.extend_from_slice(&(record % 17).to_le_bytes());
+        source.extend_from_slice(&[0, 0, 1, 0, 0, 0, 0, 1]);
+        for _ in 0..24 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            source.push((state & 0xff) as u8);
+        }
+    }
+    source
 }
 
 fn validate(source: &[u8], compressed: &[u8], encoder: &str) {
@@ -164,4 +249,8 @@ macro_rules! encode_benches {
 
 encode_benches!(text, TEXT);
 encode_benches!(repetitive, REPETITIVE);
+encode_benches!(html, HTML);
+encode_benches!(json, JSON);
+encode_benches!(javascript, JAVASCRIPT);
+encode_benches!(structured_binary, STRUCTURED_BINARY);
 encode_benches!(binary, BINARY);
