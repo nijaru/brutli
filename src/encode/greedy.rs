@@ -1,8 +1,12 @@
+mod block_split;
+
+use block_split::{BlockCursor, BlockSplitEncoding, split_literals, write_trivial_context_map};
+
 use super::bit_writer::BitWriter;
 use super::command::{ExplicitCommand, InsertCommand};
 use super::distance::{DistanceCode, alphabet_size};
 use super::match_finder::{MatchCommand, create_backward_references};
-use super::prefix_code::PrefixEncoding;
+use super::prefix_code::{PrefixEncoding, write_var_len_u8};
 use super::{
     COMMAND_ALPHABET_SIZE, DIRECT_DISTANCE_CODES, LITERAL_ALPHABET_SIZE, MAX_META_BLOCK_SIZE,
     write_final_compressed_header, write_simple_compressed_header, write_window_bits,
@@ -13,6 +17,16 @@ struct EncodedMatch {
     parsed: MatchCommand,
     command: ExplicitCommand,
     distance: Option<DistanceCode>,
+}
+
+struct EncodingPlan<'a> {
+    input: &'a [u8],
+    commands: &'a [EncodedMatch],
+    tail: &'a [u8],
+    tail_command: Option<InsertCommand>,
+    command_code: &'a PrefixEncoding,
+    distance_code: &'a PrefixEncoding,
+    distance_alphabet: u16,
 }
 
 pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
@@ -30,6 +44,7 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
     let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
     let mut commands = Vec::with_capacity(parse.commands.len());
+    let mut literal_data = Vec::new();
 
     for parsed in parse.commands {
         let command = ExplicitCommand::for_insert_and_copy_code(
@@ -44,10 +59,9 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         if let Some(distance) = distance {
             distance_frequencies[usize::from(distance.symbol)] += 1;
         }
-        count_literals(
-            &mut literal_frequencies,
-            &input[parsed.insert_start..parsed.insert_start + parsed.insert_length],
-        );
+        let literals = &input[parsed.insert_start..parsed.insert_start + parsed.insert_length];
+        count_literals(&mut literal_frequencies, literals);
+        literal_data.extend_from_slice(literals);
         commands.push(EncodedMatch {
             parsed,
             command,
@@ -62,9 +76,13 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         let command = InsertCommand::for_length(tail.len());
         command_frequencies[usize::from(command.symbol)] += 1;
         count_literals(&mut literal_frequencies, tail);
+        literal_data.extend_from_slice(tail);
         Some(command)
     };
 
+    if literal_frequencies.iter().all(|&frequency| frequency == 0) {
+        literal_frequencies[0] = 1;
+    }
     if distance_frequencies.iter().all(|&frequency| frequency == 0) {
         distance_frequencies[0] = 1;
     }
@@ -72,34 +90,125 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     let literal_code = PrefixEncoding::from_frequencies(&literal_frequencies)?;
     let command_code = PrefixEncoding::from_frequencies(&command_frequencies)?;
     let distance_code = PrefixEncoding::from_frequencies(&distance_frequencies)?;
+    let plan = EncodingPlan {
+        input,
+        commands: &commands,
+        tail,
+        tail_command,
+        command_code: &command_code,
+        distance_code: &distance_code,
+        distance_alphabet,
+    };
 
+    let single_tree = encode_single_tree(&plan, &literal_code);
+    let Some(split_tree) = encode_literal_split(&plan, &literal_data) else {
+        return Some(single_tree);
+    };
+    Some(if split_tree.len() < single_tree.len() {
+        split_tree
+    } else {
+        single_tree
+    })
+}
+
+fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) -> Vec<u8> {
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, super::DEFAULT_WINDOW_BITS);
-    write_final_compressed_header(&mut writer, input.len());
+    write_final_compressed_header(&mut writer, plan.input.len());
     write_simple_compressed_header(&mut writer, DIRECT_DISTANCE_CODES);
     literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
-    command_code.write_tree(&mut writer, COMMAND_ALPHABET_SIZE);
-    distance_code.write_tree(&mut writer, distance_alphabet);
+    plan.command_code
+        .write_tree(&mut writer, COMMAND_ALPHABET_SIZE);
+    plan.distance_code
+        .write_tree(&mut writer, plan.distance_alphabet);
 
-    for encoded in commands {
-        command_code.write_symbol(&mut writer, encoded.command.symbol);
+    for encoded in plan.commands {
+        plan.command_code
+            .write_symbol(&mut writer, encoded.command.symbol);
         encoded.command.write_extra(&mut writer);
         write_literal_slice(
             &mut writer,
-            &literal_code,
-            &input[encoded.parsed.insert_start
+            literal_code,
+            &plan.input[encoded.parsed.insert_start
                 ..encoded.parsed.insert_start + encoded.parsed.insert_length],
         );
         if let Some(distance) = encoded.distance {
-            distance_code.write_symbol(&mut writer, distance.symbol);
+            plan.distance_code.write_symbol(&mut writer, distance.symbol);
             distance.write_extra(&mut writer);
         }
     }
 
-    if let Some(command) = tail_command {
-        command_code.write_symbol(&mut writer, command.symbol);
+    if let Some(command) = plan.tail_command {
+        plan.command_code.write_symbol(&mut writer, command.symbol);
         command.write_extra(&mut writer);
-        write_literal_slice(&mut writer, &literal_code, tail);
+        write_literal_slice(&mut writer, literal_code, plan.tail);
+    }
+
+    writer.finish()
+}
+
+fn encode_literal_split(plan: &EncodingPlan<'_>, literals: &[u8]) -> Option<Vec<u8>> {
+    let split = split_literals(literals);
+    if split.num_types() == 1 {
+        return None;
+    }
+
+    let literal_codes = split
+        .histograms(literals)
+        .into_iter()
+        .map(|histogram| PrefixEncoding::from_frequencies(&histogram))
+        .collect::<Option<Vec<_>>>()?;
+    let split_encoding = BlockSplitEncoding::new(split)?;
+
+    let mut writer = BitWriter::default();
+    write_window_bits(&mut writer, super::DEFAULT_WINDOW_BITS);
+    write_final_compressed_header(&mut writer, plan.input.len());
+    split_encoding.write_header(&mut writer);
+    write_var_len_u8(&mut writer, 0); // one command block type
+    write_var_len_u8(&mut writer, 0); // one distance block type
+    writer.write_bits(0, 2); // NPOSTFIX
+    writer.write_bits(u64::from(DIRECT_DISTANCE_CODES), 4); // NDIRECT
+    for _ in 0..split_encoding.num_types() {
+        writer.write_bits(0, 2); // LSB6 literal context mode
+    }
+    write_trivial_context_map(&mut writer, literal_codes.len(), 6)?;
+    write_var_len_u8(&mut writer, 0); // one distance tree
+
+    for literal_code in &literal_codes {
+        literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
+    }
+    plan.command_code
+        .write_tree(&mut writer, COMMAND_ALPHABET_SIZE);
+    plan.distance_code
+        .write_tree(&mut writer, plan.distance_alphabet);
+
+    let mut literal_cursor = split_encoding.cursor();
+    for encoded in plan.commands {
+        plan.command_code
+            .write_symbol(&mut writer, encoded.command.symbol);
+        encoded.command.write_extra(&mut writer);
+        write_split_literal_slice(
+            &mut writer,
+            &mut literal_cursor,
+            &literal_codes,
+            &plan.input[encoded.parsed.insert_start
+                ..encoded.parsed.insert_start + encoded.parsed.insert_length],
+        );
+        if let Some(distance) = encoded.distance {
+            plan.distance_code.write_symbol(&mut writer, distance.symbol);
+            distance.write_extra(&mut writer);
+        }
+    }
+
+    if let Some(command) = plan.tail_command {
+        plan.command_code.write_symbol(&mut writer, command.symbol);
+        command.write_extra(&mut writer);
+        write_split_literal_slice(
+            &mut writer,
+            &mut literal_cursor,
+            &literal_codes,
+            plan.tail,
+        );
     }
 
     Some(writer.finish())
@@ -114,6 +223,18 @@ fn count_literals(frequencies: &mut [usize], literals: &[u8]) {
 fn write_literal_slice(writer: &mut BitWriter, code: &PrefixEncoding, literals: &[u8]) {
     for &literal in literals {
         code.write_symbol(writer, u16::from(literal));
+    }
+}
+
+fn write_split_literal_slice(
+    writer: &mut BitWriter,
+    cursor: &mut BlockCursor<'_>,
+    codes: &[PrefixEncoding],
+    literals: &[u8],
+) {
+    for &literal in literals {
+        let tree = cursor.before_symbol(writer);
+        codes[tree].write_symbol(writer, u16::from(literal));
     }
 }
 
@@ -141,6 +262,14 @@ mod tests {
     fn implicit_last_distance_round_trips() {
         let source = b"abcdabcdabcd";
         let encoded = try_compress(source).unwrap();
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn literal_block_split_stream_round_trips() {
+        let mut source = b"alpha beta gamma delta epsilon zeta eta theta ".repeat(256);
+        source.extend(b"function(x){return x*x+17;} const value = 123456789; ".repeat(256));
+        let encoded = try_compress(&source).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
