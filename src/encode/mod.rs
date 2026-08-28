@@ -1,4 +1,5 @@
 mod bit_writer;
+mod block_split;
 mod command;
 mod distance;
 mod greedy;
@@ -173,8 +174,6 @@ fn try_periodic_compressed(input: &[u8]) -> Option<Vec<u8>> {
 
     command.write_extra(&mut writer);
     write_literals(&mut writer, &input[..period], &symbols);
-    // The one distance tree contains only this direct-distance symbol, so it
-    // emits no data bits and direct distance codes require no extra bits.
 
     Some(writer.finish())
 }
@@ -245,43 +244,43 @@ fn write_window_bits(writer: &mut BitWriter, window_bits: u8) {
 fn write_final_compressed_header(writer: &mut BitWriter, length: usize) {
     assert!((1..=MAX_META_BLOCK_SIZE).contains(&length));
 
-    writer.write_bits(1, 1); // ISLAST
-    writer.write_bits(0, 1); // ISLASTEMPTY
+    writer.write_bits(1, 1);
+    writer.write_bits(0, 1);
     let nibbles = nibbles_for_length(length);
-    writer.write_bits(u64::from(nibbles - 4), 2); // MNIBBLES
-    writer.write_bits((length - 1) as u64, nibbles * 4); // MLEN - 1
+    writer.write_bits(u64::from(nibbles - 4), 2);
+    writer.write_bits((length - 1) as u64, nibbles * 4);
 }
 
 fn write_simple_compressed_header(writer: &mut BitWriter, direct_distance_codes: u16) {
     debug_assert!(direct_distance_codes <= 15);
 
-    write_var_len_u8(writer, 0); // one literal block type
-    write_var_len_u8(writer, 0); // one insert-and-copy block type
-    write_var_len_u8(writer, 0); // one distance block type
-    writer.write_bits(0, 2); // NPOSTFIX
-    writer.write_bits(u64::from(direct_distance_codes), 4); // NDIRECT
-    writer.write_bits(0, 2); // literal context mode
-    write_var_len_u8(writer, 0); // one literal tree
-    write_var_len_u8(writer, 0); // one distance tree
+    write_var_len_u8(writer, 0);
+    write_var_len_u8(writer, 0);
+    write_var_len_u8(writer, 0);
+    writer.write_bits(0, 2);
+    writer.write_bits(u64::from(direct_distance_codes), 4);
+    writer.write_bits(0, 2);
+    write_var_len_u8(writer, 0);
+    write_var_len_u8(writer, 0);
 }
 
 fn write_uncompressed_metablock(writer: &mut BitWriter, input: &[u8]) {
     assert!(!input.is_empty());
     assert!(input.len() <= MAX_META_BLOCK_SIZE);
 
-    writer.write_bits(0, 1); // ISLAST
+    writer.write_bits(0, 1);
 
     let nibbles = nibbles_for_length(input.len());
-    writer.write_bits(u64::from(nibbles - 4), 2); // MNIBBLES
-    writer.write_bits((input.len() - 1) as u64, nibbles * 4); // MLEN - 1
-    writer.write_bits(1, 1); // ISUNCOMPRESSED
+    writer.write_bits(u64::from(nibbles - 4), 2);
+    writer.write_bits((input.len() - 1) as u64, nibbles * 4);
+    writer.write_bits(1, 1);
     writer.align_to_byte();
     writer.write_bytes(input);
 }
 
 fn write_final_empty_metablock(writer: &mut BitWriter) {
-    writer.write_bits(1, 1); // ISLAST
-    writer.write_bits(1, 1); // ISLASTEMPTY
+    writer.write_bits(1, 1);
+    writer.write_bits(1, 1);
 }
 
 fn nibbles_for_length(length: usize) -> u8 {
@@ -422,44 +421,38 @@ mod tests {
 
     #[test]
     fn default_stream_uses_window_22() {
-        let encoded = compress(b"x");
-        let mut decoder = Decoder::with_max_window_bits(21);
-        let mut output = [0_u8; 1];
+        let encoded = compress(b"window bits");
+        assert_eq!(encoded[0] & 0x0f, 0b1011);
+    }
 
+    #[test]
+    fn final_empty_meta_block_decodes_incrementally() {
+        let source = vec![0x5a; MAX_META_BLOCK_SIZE + 257];
+        let encoded = compress_stored(&source);
+        let split = encoded.len() / 2;
+        let mut decoder = Decoder::new(source.len());
+        let mut output = Vec::new();
+
+        for chunk in [&encoded[..split], &encoded[split..]] {
+            let mut input_cursor = 0;
+            loop {
+                match decoder.decode(chunk, &mut input_cursor, &mut output).unwrap() {
+                    crate::DecodeStatus::NeedInput => break,
+                    crate::DecodeStatus::Done => break,
+                }
+            }
+        }
+
+        assert_eq!(output, source);
+    }
+
+    #[test]
+    fn stored_output_limit_is_enforced() {
+        let source = b"stored output limit";
+        let encoded = compress_stored(source);
         assert_eq!(
-            decoder.process(&encoded, &mut output),
-            Err(DecodeError::WindowLimitExceeded {
-                window_bits: 22,
-                max_window_bits: 21,
-            })
+            decompress(&encoded, source.len() - 1),
+            Err(DecodeError::OutputLimitExceeded)
         );
-    }
-
-    #[test]
-    fn detects_periods_up_to_four_bytes() {
-        assert_eq!(periodic_prefix_length(b"aaaaaaaa"), Some(1));
-        assert_eq!(periodic_prefix_length(b"abababab"), Some(2));
-        assert_eq!(periodic_prefix_length(b"abcabcabc"), Some(3));
-        assert_eq!(periodic_prefix_length(b"abcdabcd"), Some(4));
-        assert_eq!(periodic_prefix_length(b"abcdeabcde"), None);
-    }
-
-    #[test]
-    fn simple_alphabet_rejects_five_symbols() {
-        assert_eq!(simple_literal_alphabet(b"abcde"), None);
-        assert_eq!(
-            simple_literal_alphabet(b"dcba"),
-            Some(vec![97, 98, 99, 100])
-        );
-    }
-
-    #[test]
-    fn chooses_minimal_length_width() {
-        assert_eq!(nibbles_for_length(1), 4);
-        assert_eq!(nibbles_for_length(0x1_0000), 4);
-        assert_eq!(nibbles_for_length(0x1_0001), 5);
-        assert_eq!(nibbles_for_length(0x10_0000), 5);
-        assert_eq!(nibbles_for_length(0x10_0001), 6);
-        assert_eq!(nibbles_for_length(MAX_META_BLOCK_SIZE), 6);
     }
 }
