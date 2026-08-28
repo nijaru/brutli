@@ -102,15 +102,24 @@ impl CanonicalCode {
             first_code[length] = next;
         }
 
-        let mut symbols = Vec::with_capacity(non_zero);
         let mut first_symbol = [0_u16; MAX_CODE_BITS + 1];
-        for (length, first) in first_symbol.iter_mut().enumerate().skip(1) {
-            *first = symbols.len() as u16;
-            for (symbol, &symbol_length) in lengths.iter().enumerate() {
-                if usize::from(symbol_length) == length {
-                    symbols.push(symbol as u16);
-                }
+        let mut symbol_offset = 0_u16;
+        for length in 1..=MAX_CODE_BITS {
+            first_symbol[length] = symbol_offset;
+            symbol_offset += counts[length];
+        }
+
+        let mut next_symbol = first_symbol;
+        let mut symbols = vec![0_u16; non_zero];
+        for (symbol, &length) in lengths.iter().enumerate() {
+            if length == 0 {
+                continue;
             }
+
+            let length = usize::from(length);
+            let index = usize::from(next_symbol[length]);
+            symbols[index] = symbol as u16;
+            next_symbol[length] += 1;
         }
 
         Ok(Self {
