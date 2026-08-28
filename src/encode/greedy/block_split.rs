@@ -384,7 +384,8 @@ pub(super) fn split_literals(data: &[u8]) -> SplitResult {
 }
 
 pub(super) fn split_contextual_literals(data: &[(u8, u8)], context_count: usize) -> SplitResult {
-    let mut splitter = GreedyBlockSplitter::with_contexts(256, context_count, 512, 400.0, data.len());
+    let mut splitter =
+        GreedyBlockSplitter::with_contexts(256, context_count, 512, 400.0, data.len());
     for &(symbol, context) in data {
         splitter.add_context_symbol(usize::from(symbol), usize::from(context));
     }
@@ -522,7 +523,9 @@ fn run_length_code_zeros(values: &mut Vec<u32>) -> u32 {
     let max_prefix = if max_repetitions == 0 {
         0
     } else {
-        max_repetitions.ilog2().min(MAX_CONTEXT_MAP_RUN_LENGTH_PREFIX)
+        max_repetitions
+            .ilog2()
+            .min(MAX_CONTEXT_MAP_RUN_LENGTH_PREFIX)
     };
     let mut encoded = Vec::with_capacity(values.len());
     let mut index = 0_usize;
@@ -636,7 +639,10 @@ mod tests {
             .collect::<Vec<_>>();
         let result = split_contextual_literals(&data, 2);
         assert_eq!(result.histograms.len(), result.split.num_types * 2);
-        assert_eq!(result.histograms.iter().flatten().sum::<usize>(), data.len());
+        assert_eq!(
+            result.histograms.iter().flatten().sum::<usize>(),
+            data.len()
+        );
     }
 
     #[test]
