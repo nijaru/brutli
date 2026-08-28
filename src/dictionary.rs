@@ -66,7 +66,8 @@ pub(crate) fn word(word_length: usize, word_index: usize) -> Option<&'static [u8
     if bits == 0 || word_index >= (1_usize << bits) {
         return None;
     }
-    let offset = OFFSETS_BY_LENGTH[word_length].checked_add(word_index.checked_mul(word_length)?)?;
+    let offset =
+        OFFSETS_BY_LENGTH[word_length].checked_add(word_index.checked_mul(word_length)?)?;
     DICTIONARY.get(offset..offset.checked_add(word_length)?)
 }
 
