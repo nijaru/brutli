@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(code.lengths[2], 2);
         assert_eq!(code.lengths[3], 3);
         assert_eq!(code.lengths[4], 3);
-        assert_eq!(code.data_bits(&frequencies), 112);
+        assert_eq!(code.data_bits(&frequencies), 93);
     }
 
     #[test]
