@@ -1,4 +1,7 @@
 use super::bit_reader::BitReader;
+use super::compressed_block::CompressedStatus;
+use super::compressed_metablock::{CompressedMetaBlockDecoder, CompressedMetaBlockError};
+use super::distance::RecentDistances;
 use super::history::History;
 use super::metablock_header::{MetaBlockHeaderDecoder, MetaBlockHeaderError, MetaBlockKind};
 use super::stream_header::{StreamHeaderDecoder, StreamHeaderError};
@@ -21,7 +24,8 @@ pub(super) struct ProcessResult {
 pub(super) enum DecodeError {
     StreamHeader(StreamHeaderError),
     MetaBlockHeader(MetaBlockHeaderError),
-    CompressedDataUnsupported,
+    Compressed(CompressedMetaBlockError),
+    NonZeroFinalPadding,
 }
 
 impl From<StreamHeaderError> for DecodeError {
@@ -36,6 +40,12 @@ impl From<MetaBlockHeaderError> for DecodeError {
     }
 }
 
+impl From<CompressedMetaBlockError> for DecodeError {
+    fn from(error: CompressedMetaBlockError) -> Self {
+        Self::Compressed(error)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Decoder {
     reader: BitReader,
@@ -44,6 +54,8 @@ pub(super) struct Decoder {
     phase: Phase,
     window_bits: Option<u8>,
     history: Option<History>,
+    recent_distances: RecentDistances,
+    compressed: Option<CompressedMetaBlockDecoder>,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +63,9 @@ enum Phase {
     #[default]
     StreamHeader,
     MetaBlockHeader,
+    Compressed {
+        is_last: bool,
+    },
     Uncompressed {
         remaining: usize,
     },
@@ -103,8 +118,11 @@ impl Decoder {
 
                     self.phase = match header.kind {
                         MetaBlockKind::End => Phase::Done,
-                        MetaBlockKind::Compressed { .. } => {
-                            return Err(DecodeError::CompressedDataUnsupported);
+                        MetaBlockKind::Compressed { length } => {
+                            self.compressed = Some(CompressedMetaBlockDecoder::new(length));
+                            Phase::Compressed {
+                                is_last: header.is_last,
+                            }
                         }
                         MetaBlockKind::Uncompressed { length } => {
                             Phase::Uncompressed { remaining: length }
@@ -114,6 +132,51 @@ impl Decoder {
                             is_last: header.is_last,
                         },
                     };
+                }
+                Phase::Compressed { is_last } => {
+                    let progress = self
+                        .compressed
+                        .as_mut()
+                        .expect("compressed decoder exists in compressed phase")
+                        .process(
+                            &mut self.reader,
+                            input,
+                            &mut input_cursor,
+                            &mut output[output_cursor..],
+                            self.history
+                                .as_mut()
+                                .expect("history is initialized after the stream header"),
+                            &mut self.recent_distances,
+                        )?;
+                    output_cursor += progress.produced;
+
+                    match progress.status {
+                        CompressedStatus::NeedInput => {
+                            return Ok(ProcessResult {
+                                consumed: input_cursor,
+                                produced: output_cursor,
+                                status: ProcessStatus::NeedInput,
+                            });
+                        }
+                        CompressedStatus::NeedOutput => {
+                            return Ok(ProcessResult {
+                                consumed: input_cursor,
+                                produced: output_cursor,
+                                status: ProcessStatus::NeedOutput,
+                            });
+                        }
+                        CompressedStatus::Done => {
+                            self.compressed = None;
+                            if is_last {
+                                if !self.reader.align_to_byte_with_zero_fill() {
+                                    return Err(DecodeError::NonZeroFinalPadding);
+                                }
+                                self.phase = Phase::Done;
+                            } else {
+                                self.phase = Phase::MetaBlockHeader;
+                            }
+                        }
+                    }
                 }
                 Phase::Uncompressed { remaining } => {
                     if remaining == 0 {
@@ -203,7 +266,7 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, Decoder, ProcessStatus};
+    use super::{Decoder, ProcessStatus};
 
     #[derive(Default)]
     struct Bits {
@@ -221,6 +284,12 @@ mod tests {
             while !self.bits.len().is_multiple_of(8) {
                 self.bits.push(false);
             }
+        }
+
+        fn simple_single(&mut self, symbol: u16, symbol_bits: u8) {
+            self.push(1, 2); // simple prefix code
+            self.push(0, 2); // one symbol
+            self.push(u64::from(symbol), symbol_bits);
         }
 
         fn into_bytes(self) -> Vec<u8> {
@@ -280,6 +349,30 @@ mod tests {
         bytes
     }
 
+    fn compressed_literal_stream(literal: u8) -> Vec<u8> {
+        let mut bits = Bits::default();
+        bits.push(0, 1); // WBITS = 16
+        bits.push(1, 1); // ISLAST
+        bits.push(0, 1); // ISLASTEMPTY
+        bits.push(0, 2); // MNIBBLES = 4
+        bits.push(0, 16); // MLEN - 1 = 0, one output byte
+
+        bits.push(0, 1); // one literal block type
+        bits.push(0, 1); // one command block type
+        bits.push(0, 1); // one distance block type
+        bits.push(0, 2); // NPOSTFIX
+        bits.push(0, 4); // NDIRECT
+        bits.push(0, 2); // literal context mode LSB6
+        bits.push(0, 1); // one literal tree
+        bits.push(0, 1); // one distance tree
+
+        bits.simple_single(u16::from(literal), 8); // literal tree
+        bits.simple_single(8, 10); // insert 1, copy 2, implicit distance zero
+        bits.simple_single(0, 6); // distance tree, unused by final command
+        bits.align_zero();
+        bits.into_bytes()
+    }
+
     #[test]
     fn decodes_empty_stream() {
         let input = empty_stream();
@@ -308,6 +401,41 @@ mod tests {
         assert_eq!(result.produced, output.len());
         assert_eq!(&output, b"brutli");
         assert_eq!(decoder.history_previous_bytes(), Some((b'i', b'l')));
+    }
+
+    #[test]
+    fn decodes_compressed_literal_end_to_end() {
+        let input = compressed_literal_stream(b'A');
+        let mut decoder = Decoder::default();
+        let mut output = [0; 1];
+
+        let result = decoder.process(&input, &mut output).unwrap();
+
+        assert_eq!(result.status, ProcessStatus::Done);
+        assert_eq!(result.consumed, input.len());
+        assert_eq!(result.produced, 1);
+        assert_eq!(&output, b"A");
+        assert_eq!(decoder.history_previous_bytes(), Some((b'A', 0)));
+    }
+
+    #[test]
+    fn compressed_decoder_resumes_across_input_slices() {
+        let input = compressed_literal_stream(b'Z');
+        let split = input.len() / 2;
+        let mut decoder = Decoder::default();
+        let mut output = [0; 1];
+
+        let first = decoder.process(&input[..split], &mut output).unwrap();
+        assert_eq!(first.status, ProcessStatus::NeedInput);
+        assert_eq!(first.produced, 0);
+
+        let second = decoder
+            .process(&input[first.consumed..], &mut output)
+            .unwrap();
+        assert_eq!(second.status, ProcessStatus::Done);
+        assert_eq!(second.produced, 1);
+        assert_eq!(&output, b"Z");
+        assert_eq!(first.consumed + second.consumed, input.len());
     }
 
     #[test]
@@ -366,24 +494,5 @@ mod tests {
         assert_eq!(result.consumed, input.len());
         assert_eq!(result.produced, 0);
         assert_eq!(decoder.history_previous_bytes(), Some((0, 0)));
-    }
-
-    #[test]
-    fn reports_compressed_path_as_not_yet_implemented() {
-        let mut bits = Bits::default();
-        bits.push(0, 1); // WBITS = 16
-        bits.push(1, 1); // ISLAST
-        bits.push(0, 1); // ISLASTEMPTY
-        bits.push(0, 2); // MNIBBLES = 4
-        bits.push(0, 16); // one-byte compressed metablock
-        let input = bits.into_bytes();
-
-        let mut decoder = Decoder::default();
-        let mut output = [0; 1];
-
-        assert_eq!(
-            decoder.process(&input, &mut output),
-            Err(DecodeError::CompressedDataUnsupported)
-        );
     }
 }
