@@ -1,6 +1,8 @@
 use super::bit_writer::BitWriter;
 
 const MAX_CODE_BITS: usize = 15;
+const CODE_LENGTH_CODE_BITS: usize = 5;
+const INITIAL_REPEATED_CODE_LENGTH: u8 = 8;
 const CODE_LENGTH_ORDER: [u8; 18] = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 #[derive(Debug, Clone, Copy)]
@@ -90,11 +92,26 @@ impl PrefixEncoding {
 }
 
 fn huffman_code_lengths(frequencies: &[usize]) -> Vec<u8> {
+    huffman_code_lengths_with_limit(frequencies, MAX_CODE_BITS)
+}
+
+fn huffman_code_lengths_with_limit(frequencies: &[usize], max_code_bits: usize) -> Vec<u8> {
     let active_count = frequencies
         .iter()
         .filter(|&&frequency| frequency != 0)
         .count();
-    debug_assert!(active_count > 4);
+    debug_assert!(active_count != 0);
+    debug_assert!(active_count <= 1_usize << max_code_bits);
+
+    if active_count == 1 {
+        let mut lengths = vec![0_u8; frequencies.len()];
+        let symbol = frequencies
+            .iter()
+            .position(|&frequency| frequency != 0)
+            .expect("active symbol exists");
+        lengths[symbol] = 1;
+        return lengths;
+    }
 
     let mut count_limit = 1_u128;
     loop {
@@ -138,7 +155,7 @@ fn huffman_code_lengths(frequencies: &[usize]) -> Vec<u8> {
             let node = nodes[node_index];
             if let Some((left, right)) = node.children {
                 let child_depth = depth + 1;
-                if child_depth > MAX_CODE_BITS {
+                if child_depth > max_code_bits {
                     fits = false;
                     break;
                 }
@@ -272,139 +289,225 @@ fn simple_symbol_code(symbol_index: usize, symbol_count: usize) -> (u16, u8) {
 
 fn write_complex_prefix_code(writer: &mut BitWriter, lengths: &[u8]) {
     debug_assert!(lengths.iter().filter(|&&length| length != 0).count() > 4);
-    writer.write_bits(0, 2); // complex representation, skip zero entries
-
-    let last_symbol = lengths
-        .iter()
-        .rposition(|&length| length != 0)
-        .expect("complex prefix code has non-zero lengths");
-    let tokens = tokenize_code_lengths(&lengths[..=last_symbol]);
+    let tokens = tokenize_code_lengths(lengths);
 
     let mut token_frequencies = [0_usize; 18];
     for token in &tokens {
         token_frequencies[usize::from(token.symbol)] += 1;
     }
     let (code_length_lengths, code_length_codes) = code_length_code(&token_frequencies);
-
-    let mut remaining_space = 32_i16;
-    let active_count = code_length_lengths
-        .iter()
-        .filter(|&&length| length != 0)
-        .count();
-    for symbol in CODE_LENGTH_ORDER {
-        let length = code_length_lengths[usize::from(symbol)];
-        write_code_length_value(writer, length);
-        if length != 0 {
-            remaining_space -= 32 >> length;
-        }
-        if remaining_space == 0 {
-            break;
-        }
-    }
-    debug_assert!(remaining_space == 0 || active_count == 1);
+    write_code_length_code(writer, &code_length_lengths, &token_frequencies);
 
     for token in tokens {
         let code = code_length_codes[usize::from(token.symbol)]
             .expect("code-length token is present in its prefix code");
         writer.write_prefix(code.code, code.bits);
-        if token.symbol == 17 {
-            writer.write_bits(u64::from(token.extra), 3);
+        match token.symbol {
+            16 => writer.write_bits(u64::from(token.extra), 2),
+            17 => writer.write_bits(u64::from(token.extra), 3),
+            _ => {}
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CodeLengthToken {
     symbol: u8,
     extra: u8,
 }
 
 fn tokenize_code_lengths(lengths: &[u8]) -> Vec<CodeLengthToken> {
-    let mut tokens = Vec::new();
-    let mut index = 0;
+    let new_length = lengths
+        .iter()
+        .rposition(|&length| length != 0)
+        .map_or(0, |index| index + 1);
+    debug_assert!(new_length != 0);
 
-    while index < lengths.len() {
-        if lengths[index] != 0 {
-            tokens.push(CodeLengthToken {
-                symbol: lengths[index],
-                extra: 0,
-            });
-            index += 1;
-            continue;
-        }
+    let (use_rle_for_non_zero, use_rle_for_zero) = if lengths.len() > 50 {
+        decide_over_rle_use(&lengths[..new_length])
+    } else {
+        (false, false)
+    };
 
-        let run_start = index;
-        while index < lengths.len() && lengths[index] == 0 {
-            index += 1;
-        }
-        let mut remaining = index - run_start;
-
-        while remaining >= 3 {
-            let chunk = remaining.min(10);
-            tokens.push(CodeLengthToken {
-                symbol: 17,
-                extra: (chunk - 3) as u8,
-            });
-            remaining -= chunk;
-
-            // Consecutive repeat-17 symbols extend one chained run rather than
-            // starting a new run. An explicit zero resets that state.
-            if remaining >= 3 {
-                tokens.push(CodeLengthToken {
-                    symbol: 0,
-                    extra: 0,
-                });
-                remaining -= 1;
+    let mut previous_value = INITIAL_REPEATED_CODE_LENGTH;
+    let mut tokens = Vec::with_capacity(new_length);
+    let mut index = 0_usize;
+    while index < new_length {
+        let value = lengths[index];
+        let mut repetitions = 1_usize;
+        if (value != 0 && use_rle_for_non_zero) || (value == 0 && use_rle_for_zero) {
+            while index + repetitions < new_length && lengths[index + repetitions] == value {
+                repetitions += 1;
             }
         }
 
-        tokens.extend((0..remaining).map(|_| CodeLengthToken {
-            symbol: 0,
-            extra: 0,
-        }));
+        if value == 0 {
+            write_zero_repetitions(repetitions, &mut tokens);
+        } else {
+            write_repetitions(previous_value, value, repetitions, &mut tokens);
+            previous_value = value;
+        }
+        index += repetitions;
     }
-
     tokens
 }
 
+fn decide_over_rle_use(lengths: &[u8]) -> (bool, bool) {
+    let mut total_reps_zero = 0_usize;
+    let mut total_reps_non_zero = 0_usize;
+    let mut count_reps_zero = 1_usize;
+    let mut count_reps_non_zero = 1_usize;
+    let mut index = 0_usize;
+
+    while index < lengths.len() {
+        let value = lengths[index];
+        let mut repetitions = 1_usize;
+        while index + repetitions < lengths.len() && lengths[index + repetitions] == value {
+            repetitions += 1;
+        }
+        if repetitions >= 3 && value == 0 {
+            total_reps_zero += repetitions;
+            count_reps_zero += 1;
+        }
+        if repetitions >= 4 && value != 0 {
+            total_reps_non_zero += repetitions;
+            count_reps_non_zero += 1;
+        }
+        index += repetitions;
+    }
+
+    (
+        total_reps_non_zero > count_reps_non_zero * 2,
+        total_reps_zero > count_reps_zero * 2,
+    )
+}
+
+fn write_repetitions(
+    previous_value: u8,
+    value: u8,
+    mut repetitions: usize,
+    tokens: &mut Vec<CodeLengthToken>,
+) {
+    debug_assert!(repetitions > 0);
+    if previous_value != value {
+        tokens.push(CodeLengthToken {
+            symbol: value,
+            extra: 0,
+        });
+        repetitions -= 1;
+    }
+    if repetitions == 7 {
+        tokens.push(CodeLengthToken {
+            symbol: value,
+            extra: 0,
+        });
+        repetitions -= 1;
+    }
+    if repetitions < 3 {
+        tokens.extend((0..repetitions).map(|_| CodeLengthToken {
+            symbol: value,
+            extra: 0,
+        }));
+        return;
+    }
+
+    repetitions -= 3;
+    let start = tokens.len();
+    loop {
+        tokens.push(CodeLengthToken {
+            symbol: 16,
+            extra: (repetitions & 0x3) as u8,
+        });
+        repetitions >>= 2;
+        if repetitions == 0 {
+            break;
+        }
+        repetitions -= 1;
+    }
+    tokens[start..].reverse();
+}
+
+fn write_zero_repetitions(mut repetitions: usize, tokens: &mut Vec<CodeLengthToken>) {
+    if repetitions == 11 {
+        tokens.push(CodeLengthToken {
+            symbol: 0,
+            extra: 0,
+        });
+        repetitions -= 1;
+    }
+    if repetitions < 3 {
+        tokens.extend((0..repetitions).map(|_| CodeLengthToken {
+            symbol: 0,
+            extra: 0,
+        }));
+        return;
+    }
+
+    repetitions -= 3;
+    let start = tokens.len();
+    loop {
+        tokens.push(CodeLengthToken {
+            symbol: 17,
+            extra: (repetitions & 0x7) as u8,
+        });
+        repetitions >>= 3;
+        if repetitions == 0 {
+            break;
+        }
+        repetitions -= 1;
+    }
+    tokens[start..].reverse();
+}
+
 fn code_length_code(frequencies: &[usize; 18]) -> ([u8; 18], [Option<SymbolCode>; 18]) {
-    let mut active: Vec<u8> = frequencies
-        .iter()
-        .enumerate()
-        .filter(|&(_, &frequency)| frequency != 0)
-        .map(|(symbol, _)| symbol as u8)
-        .collect();
-    debug_assert!(!active.is_empty());
-
+    let lengths_vec = huffman_code_lengths_with_limit(frequencies, CODE_LENGTH_CODE_BITS);
     let mut lengths = [0_u8; 18];
-    if active.len() == 1 {
-        lengths[usize::from(active[0])] = 1;
-        let mut codes = [None; 18];
-        codes[usize::from(active[0])] = Some(SymbolCode { code: 0, bits: 0 });
-        return (lengths, codes);
-    }
-
-    active.sort_unstable_by(|&left, &right| {
-        frequencies[usize::from(right)]
-            .cmp(&frequencies[usize::from(left)])
-            .then_with(|| left.cmp(&right))
-    });
-    let count = active.len();
-    let short_bits = (usize::BITS - 1 - count.leading_zeros()) as u8;
-    let long_bits = short_bits + 1;
-    let short_count = (1_usize << long_bits) - count;
-    for (index, &symbol) in active.iter().enumerate() {
-        lengths[usize::from(symbol)] = if index < short_count {
-            short_bits
-        } else {
-            long_bits
-        };
-    }
+    lengths.copy_from_slice(&lengths_vec);
 
     let codes_vec = canonical_codes(&lengths);
     let mut codes = [None; 18];
     codes.copy_from_slice(&codes_vec);
+    if frequencies.iter().filter(|&&frequency| frequency != 0).count() == 1 {
+        let symbol = frequencies
+            .iter()
+            .position(|&frequency| frequency != 0)
+            .expect("code-length token exists");
+        codes[symbol] = Some(SymbolCode { code: 0, bits: 0 });
+    }
     (lengths, codes)
+}
+
+fn write_code_length_code(
+    writer: &mut BitWriter,
+    code_length_lengths: &[u8; 18],
+    token_frequencies: &[usize; 18],
+) {
+    let num_codes = token_frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    let mut codes_to_store = CODE_LENGTH_ORDER.len();
+    if num_codes > 1 {
+        while codes_to_store > 0
+            && code_length_lengths[usize::from(CODE_LENGTH_ORDER[codes_to_store - 1])] == 0
+        {
+            codes_to_store -= 1;
+        }
+    }
+
+    let mut skip = 0_usize;
+    if code_length_lengths[usize::from(CODE_LENGTH_ORDER[0])] == 0
+        && code_length_lengths[usize::from(CODE_LENGTH_ORDER[1])] == 0
+    {
+        skip = 2;
+        if code_length_lengths[usize::from(CODE_LENGTH_ORDER[2])] == 0 {
+            skip = 3;
+        }
+    }
+    writer.write_bits(skip as u64, 2);
+    for &symbol in &CODE_LENGTH_ORDER[skip..codes_to_store] {
+        write_code_length_value(writer, code_length_lengths[usize::from(symbol)]);
+    }
 }
 
 fn canonical_codes(lengths: &[u8]) -> Vec<Option<SymbolCode>> {
@@ -453,8 +556,8 @@ fn write_code_length_value(writer: &mut BitWriter, value: u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CODE_BITS, PrefixEncoding, balanced_code_lengths, tokenize_code_lengths,
-        write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
+        MAX_CODE_BITS, CodeLengthToken, PrefixEncoding, balanced_code_lengths,
+        tokenize_code_lengths, write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
     };
     use crate::encode::bit_writer::BitWriter;
 
@@ -545,13 +648,50 @@ mod tests {
     }
 
     #[test]
-    fn zero_run_tokenization_resets_repeat_chains() {
-        let lengths = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    fn nonzero_repetition_tokens_match_reference_chaining() {
+        let mut lengths = vec![5_u8; 12];
+        lengths.push(4);
+        lengths.resize(64, 0);
         let tokens = tokenize_code_lengths(&lengths);
-        let symbols: Vec<u8> = tokens.iter().map(|token| token.symbol).collect();
+        assert_eq!(
+            &tokens[..3],
+            &[
+                CodeLengthToken {
+                    symbol: 5,
+                    extra: 0,
+                },
+                CodeLengthToken {
+                    symbol: 16,
+                    extra: 1,
+                },
+                CodeLengthToken {
+                    symbol: 16,
+                    extra: 0,
+                },
+            ]
+        );
+    }
 
-        assert_eq!(symbols, [2, 17, 0, 0, 0, 2]);
-        assert_eq!(tokens[1].extra, 7);
+    #[test]
+    fn eleven_zero_repetitions_use_reference_special_case() {
+        let mut lengths = vec![3_u8; 8];
+        lengths.extend([0_u8; 11]);
+        lengths.push(3);
+        lengths.resize(64, 0);
+        let tokens = tokenize_code_lengths(&lengths);
+        assert!(tokens.windows(2).any(|pair| {
+            pair
+                == [
+                    CodeLengthToken {
+                        symbol: 0,
+                        extra: 0,
+                    },
+                    CodeLengthToken {
+                        symbol: 17,
+                        extra: 7,
+                    },
+                ]
+        }));
     }
 
     fn assert_complete_tree(lengths: &[u8]) {
