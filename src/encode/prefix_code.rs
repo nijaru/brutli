@@ -44,8 +44,8 @@ impl PrefixEncoding {
             });
         }
 
-        let lengths = huffman_code_lengths(frequencies)
-            .unwrap_or_else(|| balanced_code_lengths(frequencies));
+        let lengths =
+            huffman_code_lengths(frequencies).unwrap_or_else(|| balanced_code_lengths(frequencies));
         let codes = canonical_codes(&lengths);
         symbols.sort_unstable();
         Some(Self {
@@ -575,15 +575,7 @@ mod tests {
             }
         }
 
-        search(
-            frequencies,
-            max_length,
-            target_space,
-            0,
-            0,
-            0,
-            &mut best,
-        );
+        search(frequencies, max_length, target_space, 0, 0, 0, &mut best);
         assert_ne!(best, usize::MAX);
         best
     }
