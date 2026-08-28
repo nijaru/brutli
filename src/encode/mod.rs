@@ -1,0 +1,133 @@
+mod bit_writer;
+
+use bit_writer::BitWriter;
+
+const DEFAULT_WINDOW_BITS: u8 = 22;
+const MAX_META_BLOCK_SIZE: usize = 1 << 24;
+
+pub(super) fn compress(input: &[u8]) -> Vec<u8> {
+    let mut writer = BitWriter::default();
+    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+
+    for chunk in input.chunks(MAX_META_BLOCK_SIZE) {
+        write_uncompressed_metablock(&mut writer, chunk);
+    }
+
+    write_final_empty_metablock(&mut writer);
+    writer.finish()
+}
+
+fn write_window_bits(writer: &mut BitWriter, window_bits: u8) {
+    match window_bits {
+        16 => writer.write_bits(0, 1),
+        18..=24 => {
+            writer.write_bits(1, 1);
+            writer.write_bits(u64::from(window_bits - 17), 3);
+        }
+        17 => {
+            writer.write_bits(1, 1);
+            writer.write_bits(0, 3);
+            writer.write_bits(0, 3);
+        }
+        10..=15 => {
+            writer.write_bits(1, 1);
+            writer.write_bits(0, 3);
+            writer.write_bits(u64::from(window_bits - 8), 3);
+        }
+        _ => panic!("RFC 7932 window bits must be in 10..=24"),
+    }
+}
+
+fn write_uncompressed_metablock(writer: &mut BitWriter, input: &[u8]) {
+    assert!(!input.is_empty());
+    assert!(input.len() <= MAX_META_BLOCK_SIZE);
+
+    writer.write_bits(0, 1); // ISLAST
+
+    let nibbles = nibbles_for_length(input.len());
+    writer.write_bits(u64::from(nibbles - 4), 2); // MNIBBLES
+    writer.write_bits((input.len() - 1) as u64, nibbles * 4); // MLEN - 1
+    writer.write_bits(1, 1); // ISUNCOMPRESSED
+    writer.align_to_byte();
+    writer.write_bytes(input);
+}
+
+fn write_final_empty_metablock(writer: &mut BitWriter) {
+    writer.write_bits(1, 1); // ISLAST
+    writer.write_bits(1, 1); // ISLASTEMPTY
+}
+
+fn nibbles_for_length(length: usize) -> u8 {
+    debug_assert!((1..=MAX_META_BLOCK_SIZE).contains(&length));
+    match length {
+        1..=0x1_0000 => 4,
+        0x1_0001..=0x10_0000 => 5,
+        _ => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_META_BLOCK_SIZE, compress, nibbles_for_length};
+    use crate::{DecodeError, Decoder, decompress};
+
+    #[test]
+    fn empty_stream_round_trips() {
+        let encoded = compress(&[]);
+        assert_eq!(decompress(&encoded, 0).unwrap(), b"");
+    }
+
+    #[test]
+    fn stored_stream_round_trips() {
+        let source = b"brutli encoder baseline";
+        let encoded = compress(source);
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn reference_decoder_accepts_output() {
+        let source = b"standards-compliant Brotli output from Brutli".repeat(1024);
+        let encoded = compress(&source);
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
+
+        assert!(matches!(
+            info.result,
+            brotli_decompressor::BrotliResult::ResultSuccess
+        ));
+        assert_eq!(info.decoded_size, source.len());
+        assert_eq!(&decoded[..info.decoded_size], source);
+    }
+
+    #[test]
+    fn crosses_four_nibble_length_boundary() {
+        let source = vec![0xa5; 0x1_0001];
+        let encoded = compress(&source);
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn default_stream_uses_window_22() {
+        let encoded = compress(b"x");
+        let mut decoder = Decoder::with_max_window_bits(21);
+        let mut output = [0_u8; 1];
+
+        assert_eq!(
+            decoder.process(&encoded, &mut output),
+            Err(DecodeError::WindowLimitExceeded {
+                window_bits: 22,
+                max_window_bits: 21,
+            })
+        );
+    }
+
+    #[test]
+    fn chooses_minimal_length_width() {
+        assert_eq!(nibbles_for_length(1), 4);
+        assert_eq!(nibbles_for_length(0x1_0000), 4);
+        assert_eq!(nibbles_for_length(0x1_0001), 5);
+        assert_eq!(nibbles_for_length(0x10_0000), 5);
+        assert_eq!(nibbles_for_length(0x10_0001), 6);
+        assert_eq!(nibbles_for_length(MAX_META_BLOCK_SIZE), 6);
+    }
+}
