@@ -14,6 +14,8 @@ Brutli is a ground-up implementation of the Brotli format based on the specifica
 - Configurable decoded-output and Brotli window limits.
 - Static dictionary support, including all RFC 7932 transforms.
 - Differential tests across reference encoder quality and window settings.
+- Large-stream tests that repeatedly wrap small Brotli history windows.
+- A deterministic bytewise reference model for bulk history-copy semantics.
 - Malformed/truncated-input tests and coverage-guided fuzzing.
 - Stable Rust 1.98 and Rust 2024 Edition.
 - No mandatory third-party dependencies.
@@ -89,6 +91,8 @@ The decoder currently includes:
 
 - reference-produced compatibility fixtures,
 - a generated differential matrix covering qualities 0 through 11 and multiple window sizes,
+- multi-megabyte reference streams exercising repeated history-window wraparound,
+- a bytewise reference model for validating optimized ring/history operations,
 - deterministic malformed-input and truncation tests,
 - single-bit mutation tests,
 - a `cargo-fuzz` libFuzzer target with CI smoke runs and scheduled longer runs.
@@ -102,13 +106,15 @@ cargo clippy --all-targets --all-features
 
 ## Benchmarks
 
-The initial decoder benchmark compares Brutli with `rust-brotli` on text, highly repetitive data, and incompressible binary data:
+The decoder benchmark compares Brutli with `rust-brotli` on text, highly repetitive data, and incompressible binary data:
 
 ```text
 cargo bench --bench decode
 ```
 
-Benchmarks use Divan and report decoded-byte throughput. Google Brotli comparison and profile-guided optimization follow after the Rust baseline is established.
+The harness validates every fixture before timing and reports decoded-byte throughput for multiple API shapes: Brutli's direct incremental core, one-shot helper, and `Read` adapter, plus `rust-brotli`'s direct `brotli_decode`, `Decompressor`, and `BrotliDecompress` paths.
+
+GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. The next performance phase is controlled local profiling and benchmarking against both `rust-brotli` and the official Google Brotli decoder, including CPU counters and allocation/memory measurements.
 
 ## Non-goals for the initial decoder
 
