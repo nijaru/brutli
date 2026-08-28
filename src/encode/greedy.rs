@@ -1,7 +1,7 @@
 use super::bit_writer::BitWriter;
 use super::command::{ExplicitCommand, InsertCommand};
-use super::distance::{DistanceCode, RecentDistances, alphabet_size};
-use super::match_finder::{MatchCommand, greedy_parse};
+use super::distance::{DistanceCode, alphabet_size};
+use super::match_finder::{MatchCommand, create_backward_references};
 use super::prefix_code::PrefixEncoding;
 use super::{
     COMMAND_ALPHABET_SIZE, DIRECT_DISTANCE_CODES, LITERAL_ALPHABET_SIZE, MAX_META_BLOCK_SIZE,
@@ -12,7 +12,7 @@ use super::{
 struct EncodedMatch {
     parsed: MatchCommand,
     command: ExplicitCommand,
-    distance: DistanceCode,
+    distance: Option<DistanceCode>,
 }
 
 pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
@@ -20,7 +20,7 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let parse = greedy_parse(input);
+    let parse = create_backward_references(input);
     if parse.commands.is_empty() {
         return None;
     }
@@ -30,13 +30,20 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
     let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
     let mut commands = Vec::with_capacity(parse.commands.len());
-    let mut recent_distances = RecentDistances::default();
 
     for parsed in parse.commands {
-        let command = ExplicitCommand::for_lengths(parsed.insert_length, parsed.copy_length);
-        let distance = recent_distances.encode(parsed.distance, DIRECT_DISTANCE_CODES);
+        let command = ExplicitCommand::for_insert_and_copy_code(
+            parsed.insert_length,
+            parsed.copy_length_code,
+            parsed.distance_code == 0,
+        );
+        let distance = command
+            .requires_distance()
+            .then(|| DistanceCode::for_code(parsed.distance_code, DIRECT_DISTANCE_CODES));
         command_frequencies[usize::from(command.symbol)] += 1;
-        distance_frequencies[usize::from(distance.symbol)] += 1;
+        if let Some(distance) = distance {
+            distance_frequencies[usize::from(distance.symbol)] += 1;
+        }
         count_literals(
             &mut literal_frequencies,
             &input[parsed.insert_start..parsed.insert_start + parsed.insert_length],
@@ -57,6 +64,10 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         count_literals(&mut literal_frequencies, tail);
         Some(command)
     };
+
+    if distance_frequencies.iter().all(|&frequency| frequency == 0) {
+        distance_frequencies[0] = 1;
+    }
 
     let literal_code = PrefixEncoding::from_frequencies(&literal_frequencies)?;
     let command_code = PrefixEncoding::from_frequencies(&command_frequencies)?;
@@ -79,8 +90,10 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
             &input[encoded.parsed.insert_start
                 ..encoded.parsed.insert_start + encoded.parsed.insert_length],
         );
-        distance_code.write_symbol(&mut writer, encoded.distance.symbol);
-        encoded.distance.write_extra(&mut writer);
+        if let Some(distance) = encoded.distance {
+            distance_code.write_symbol(&mut writer, distance.symbol);
+            distance.write_extra(&mut writer);
+        }
     }
 
     if let Some(command) = tail_command {
@@ -121,6 +134,13 @@ mod tests {
         let source =
             b"alpha beta gamma alpha beta delta alpha beta gamma alpha beta delta".repeat(64);
         let encoded = try_compress(&source).unwrap();
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn implicit_last_distance_round_trips() {
+        let source = b"abcdabcdabcd";
+        let encoded = try_compress(source).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 

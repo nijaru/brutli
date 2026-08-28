@@ -2,6 +2,8 @@ use super::bit_writer::BitWriter;
 
 const SHORT_CODE_COUNT: u16 = 16;
 const POSTFIX_CODE_COUNT: u16 = 48;
+const LAST_DISTANCE_CODES: [u16; 7] = [8, 6, 4, 0, 5, 7, 9];
+const SECOND_LAST_DISTANCE_CODES: [u16; 7] = [14, 12, 10, 1, 11, 13, 15];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DistanceCode {
@@ -24,19 +26,48 @@ impl Default for RecentDistances {
 }
 
 impl RecentDistances {
-    pub(super) fn encode(&mut self, distance: usize, direct_codes: u16) -> DistanceCode {
-        let code = match self.short_symbol(distance) {
-            Some(symbol) => DistanceCode::for_short_symbol(symbol),
-            None => DistanceCode::for_distance(distance, direct_codes),
-        };
-        if code.symbol != 0 {
-            self.push(distance);
-        }
-        code
+    pub(super) const fn values(&self) -> [usize; 4] {
+        self.values
     }
 
-    fn short_symbol(&self, distance: usize) -> Option<u16> {
-        (0..SHORT_CODE_COUNT).find(|&symbol| self.resolve_short(symbol) == Some(distance))
+    pub(super) fn compute_code(&self, distance: usize, max_distance: usize) -> usize {
+        if distance <= max_distance {
+            if distance == self.values[0] {
+                return 0;
+            }
+            if distance == self.values[1] {
+                return 1;
+            }
+            if let Some(offset) = short_offset(distance, self.values[0]) {
+                return usize::from(LAST_DISTANCE_CODES[offset]);
+            }
+            if let Some(offset) = short_offset(distance, self.values[1]) {
+                return usize::from(SECOND_LAST_DISTANCE_CODES[offset]);
+            }
+            if distance == self.values[2] {
+                return 2;
+            }
+            if distance == self.values[3] {
+                return 3;
+            }
+        }
+
+        distance
+            .checked_add(usize::from(SHORT_CODE_COUNT) - 1)
+            .expect("distance code fits usize")
+    }
+
+    pub(super) fn push(&mut self, distance: usize) {
+        self.values.copy_within(..3, 1);
+        self.values[0] = distance;
+    }
+
+    pub(super) fn encode(&mut self, distance: usize, direct_codes: u16) -> DistanceCode {
+        let raw_code = self.compute_code(distance, usize::MAX);
+        if raw_code != 0 {
+            self.push(distance);
+        }
+        DistanceCode::for_code(raw_code, direct_codes)
     }
 
     fn resolve_short(&self, symbol: u16) -> Option<usize> {
@@ -63,11 +94,13 @@ impl RecentDistances {
             .checked_add_signed(delta)
             .filter(|&distance| distance != 0)
     }
+}
 
-    fn push(&mut self, distance: usize) {
-        self.values.copy_within(..3, 1);
-        self.values[0] = distance;
-    }
+fn short_offset(distance: usize, cached: usize) -> Option<usize> {
+    distance
+        .checked_add(3)
+        .and_then(|value| value.checked_sub(cached))
+        .filter(|&offset| offset < 7)
 }
 
 impl DistanceCode {
@@ -78,6 +111,14 @@ impl DistanceCode {
             extra: 0,
             extra_bits: 0,
         }
+    }
+
+    pub(super) fn for_code(code: usize, direct_codes: u16) -> Self {
+        if code < usize::from(SHORT_CODE_COUNT) {
+            return Self::for_short_symbol(code as u16);
+        }
+        let distance = code - (usize::from(SHORT_CODE_COUNT) - 1);
+        Self::for_distance(distance, direct_codes)
     }
 
     pub(super) fn for_distance(distance: usize, direct_codes: u16) -> Self {
@@ -139,6 +180,14 @@ mod tests {
     }
 
     #[test]
+    fn raw_distance_codes_preserve_short_codes() {
+        for code in 0..16 {
+            assert_eq!(DistanceCode::for_code(code, 4).symbol, code as u16);
+        }
+        assert_eq!(DistanceCode::for_code(16, 4).symbol, 16);
+    }
+
+    #[test]
     fn initial_recent_distances_match_the_spec() {
         let recent = RecentDistances::default();
         let expected = [4, 11, 15, 16, 3, 5, 2, 6, 1, 7, 10, 12, 9, 13, 8, 14];
@@ -146,6 +195,16 @@ mod tests {
         for (symbol, &distance) in expected.iter().enumerate() {
             assert_eq!(recent.resolve_short(symbol as u16), Some(distance));
         }
+    }
+
+    #[test]
+    fn reference_distance_code_priority_matches_encoder() {
+        let recent = RecentDistances::default();
+        assert_eq!(recent.compute_code(4, 100), 0);
+        assert_eq!(recent.compute_code(11, 100), 1);
+        assert_eq!(recent.compute_code(3, 100), 4);
+        assert_eq!(recent.compute_code(15, 100), 2);
+        assert_eq!(recent.compute_code(100, 100), 115);
     }
 
     #[test]

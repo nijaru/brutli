@@ -1,23 +1,32 @@
-use super::{DIRECT_DISTANCE_CODES, command::ExplicitCommand, distance::DistanceCode};
+use super::distance::RecentDistances;
 
-const TABLE_BITS: usize = 16;
-const TABLE_SIZE: usize = 1 << TABLE_BITS;
-const BUCKET_SIZE: usize = 2;
-const MIN_MATCH: usize = 4;
-const MAX_LAZY_MATCH: usize = 16;
-const MATCH_WORD_BYTES: usize = 8;
+const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
+const BUCKET_BITS: usize = 14;
+const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
+const BLOCK_BITS: usize = 4;
+const BLOCK_SIZE: usize = 1 << BLOCK_BITS;
+const BLOCK_MASK: usize = BLOCK_SIZE - 1;
+const HASH_TYPE_LENGTH: usize = 4;
+const STORE_LOOKAHEAD: usize = 4;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
-const LITERAL_BIT_ESTIMATE: isize = 8;
-const EMPTY: u32 = u32::MAX;
-
-type MatchBucket = [u32; BUCKET_SIZE];
+const NUM_LAST_DISTANCES_TO_CHECK: usize = 4;
+const LITERAL_BYTE_SCORE: usize = 135;
+const DISTANCE_BIT_PENALTY: usize = 30;
+const SCORE_BASE: usize = DISTANCE_BIT_PENALTY * usize::BITS as usize;
+const MIN_SCORE: usize = SCORE_BASE + 100;
+const LAZY_SCORE_DELTA: usize = 175;
+const MAX_LAZY_DELAYS: usize = 4;
+const RANDOM_HEURISTICS_WINDOW: usize = 64;
+const MATCH_WORD_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MatchCommand {
     pub(super) insert_start: usize,
     pub(super) insert_length: usize,
     pub(super) copy_length: usize,
+    pub(super) copy_length_code: usize,
     pub(super) distance: usize,
+    pub(super) distance_code: usize,
 }
 
 #[derive(Debug, Default)]
@@ -26,144 +35,263 @@ pub(super) struct Parse {
     pub(super) tail_start: usize,
 }
 
-pub(super) fn greedy_parse(input: &[u8]) -> Parse {
+#[derive(Debug, Clone, Copy)]
+struct SearchResult {
+    length: usize,
+    distance: usize,
+    score: usize,
+}
+
+impl SearchResult {
+    const fn new() -> Self {
+        Self {
+            length: 0,
+            distance: 0,
+            score: MIN_SCORE,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QualityFiveHasher {
+    counts: Vec<u16>,
+    buckets: Vec<u32>,
+}
+
+impl QualityFiveHasher {
+    fn new() -> Self {
+        Self {
+            counts: vec![0; BUCKET_COUNT],
+            buckets: vec![0; BUCKET_COUNT * BLOCK_SIZE],
+        }
+    }
+
+    fn store(&mut self, input: &[u8], position: usize) {
+        let key = hash4(input, position);
+        let count = usize::from(self.counts[key]);
+        let offset = (key << BLOCK_BITS) + (count & BLOCK_MASK);
+        self.buckets[offset] = position as u32;
+        self.counts[key] = self.counts[key].wrapping_add(1);
+    }
+
+    fn store_range(&mut self, input: &[u8], start: usize, end: usize) {
+        for position in start..end {
+            self.store(input, position);
+        }
+    }
+
+    fn find_longest_match(
+        &mut self,
+        input: &[u8],
+        recent_distances: [usize; 4],
+        position: usize,
+        max_length: usize,
+        max_backward: usize,
+    ) -> SearchResult {
+        let key = hash4(input, position);
+        let count = usize::from(self.counts[key]);
+        let bucket_start = key << BLOCK_BITS;
+        let mut result = SearchResult::new();
+        let mut best_length = 0_usize;
+        let mut best_score = MIN_SCORE;
+
+        for (index, &backward) in recent_distances
+            .iter()
+            .take(NUM_LAST_DISTANCES_TO_CHECK)
+            .enumerate()
+        {
+            if backward == 0 || backward > position || backward > max_backward {
+                continue;
+            }
+            let previous = position - backward;
+            if best_length < max_length
+                && input[position + best_length] != input[previous + best_length]
+            {
+                continue;
+            }
+
+            let length = match_length(input, previous, position, max_length);
+            if length >= 3 || (length == 2 && index < 2) {
+                let mut score = score_using_last_distance(length);
+                if best_score < score {
+                    if index != 0 {
+                        score = score.saturating_sub(last_distance_penalty(index));
+                    }
+                    if best_score < score {
+                        best_score = score;
+                        best_length = length;
+                        result = SearchResult {
+                            length,
+                            distance: backward,
+                            score,
+                        };
+                    }
+                }
+            }
+        }
+
+        let comparison_length = best_length.max(3);
+        let oldest = count.saturating_sub(BLOCK_SIZE);
+        for index in (oldest..count).rev() {
+            let previous = self.buckets[bucket_start + (index & BLOCK_MASK)] as usize;
+            debug_assert!(previous < position);
+            let backward = position - previous;
+            if backward > max_backward {
+                break;
+            }
+
+            if comparison_length < max_length {
+                let compare_at = comparison_length - 3;
+                if input[position + compare_at..position + compare_at + 4]
+                    != input[previous + compare_at..previous + compare_at + 4]
+                {
+                    continue;
+                }
+            }
+
+            let length = match_length(input, previous, position, max_length);
+            if length >= 4 {
+                let score = backward_reference_score(length, backward);
+                if best_score < score {
+                    best_score = score;
+                    best_length = length;
+                    result = SearchResult {
+                        length,
+                        distance: backward,
+                        score,
+                    };
+                }
+            }
+        }
+
+        let offset = bucket_start + (count & BLOCK_MASK);
+        self.buckets[offset] = position as u32;
+        self.counts[key] = self.counts[key].wrapping_add(1);
+        result
+    }
+}
+
+pub(super) fn create_backward_references(input: &[u8]) -> Parse {
     assert!(
         u32::try_from(input.len()).is_ok(),
         "match input exceeds u32 position range"
     );
 
-    if input.len() < MIN_MATCH * 2 {
+    if input.len() <= HASH_TYPE_LENGTH {
         return Parse {
             commands: Vec::new(),
             tail_start: 0,
         };
     }
 
-    let mut table = vec![[EMPTY; BUCKET_SIZE]; TABLE_SIZE];
-    let mut cursors = vec![0_u8; TABLE_SIZE];
+    let end = input.len();
+    let store_end = if end >= STORE_LOOKAHEAD {
+        end - STORE_LOOKAHEAD + 1
+    } else {
+        0
+    };
+    let mut hasher = QualityFiveHasher::new();
+    let mut recent_distances = RecentDistances::default();
     let mut commands = Vec::new();
     let mut position = 0_usize;
-    let mut literal_start = 0_usize;
+    let mut insert_start = 0_usize;
+    let mut insert_length = 0_usize;
+    let mut apply_random_heuristics = RANDOM_HEURISTICS_WINDOW;
 
-    while position + MIN_MATCH <= input.len() {
-        let key = hash4(input, position);
-        let candidates = table[key];
-        insert_position(&mut table[key], &mut cursors[key], position as u32);
+    while position + HASH_TYPE_LENGTH < end {
+        let max_backward = position.min(MAX_BACKWARD_DISTANCE);
+        let mut result = hasher.find_longest_match(
+            input,
+            recent_distances.values(),
+            position,
+            end - position,
+            max_backward,
+        );
 
-        let Some((previous_position, match_length)) = best_match(input, position, &candidates)
-        else {
+        if result.score > MIN_SCORE {
+            let mut delayed = 0_usize;
+            loop {
+                let next_position = position + 1;
+                let next_max_backward = next_position.min(MAX_BACKWARD_DISTANCE);
+                let next = hasher.find_longest_match(
+                    input,
+                    recent_distances.values(),
+                    next_position,
+                    end - next_position,
+                    next_max_backward,
+                );
+                if next.score >= result.score + LAZY_SCORE_DELTA {
+                    position = next_position;
+                    insert_length += 1;
+                    result = next;
+                    delayed += 1;
+                    if delayed < MAX_LAZY_DELAYS && position + HASH_TYPE_LENGTH < end {
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            apply_random_heuristics = position
+                .saturating_add(2 * result.length)
+                .saturating_add(RANDOM_HEURISTICS_WINDOW);
+            let max_backward = position.min(MAX_BACKWARD_DISTANCE);
+            let distance_code = recent_distances.compute_code(result.distance, max_backward);
+            if result.distance <= max_backward && distance_code != 0 {
+                recent_distances.push(result.distance);
+            }
+
+            commands.push(MatchCommand {
+                insert_start,
+                insert_length,
+                copy_length: result.length,
+                copy_length_code: result.length,
+                distance: result.distance,
+                distance_code,
+            });
+
+            let mut range_start = position + 2;
+            let range_end = (position + result.length).min(store_end);
+            if result.distance < (result.length >> 2) {
+                range_start = range_start
+                    .max(position + result.length - (result.distance << 2))
+                    .min(range_end);
+            }
+            hasher.store_range(input, range_start, range_end);
+
+            position += result.length;
+            insert_start = position;
+            insert_length = 0;
+        } else {
+            insert_length += 1;
             position += 1;
-            continue;
-        };
 
-        if match_length <= MAX_LAZY_MATCH
-            && should_defer_match(
-                input,
-                position,
-                literal_start,
-                previous_position,
-                match_length,
-                &table,
-            )
-        {
-            position += 1;
-            continue;
-        }
-
-        commands.push(MatchCommand {
-            insert_start: literal_start,
-            insert_length: position - literal_start,
-            copy_length: match_length,
-            distance: position - previous_position,
-        });
-
-        let end = position + match_length;
-        for skipped in position + 1..end {
-            if skipped + MIN_MATCH <= input.len() {
-                let key = hash4(input, skipped);
-                insert_position(&mut table[key], &mut cursors[key], skipped as u32);
+            if position > apply_random_heuristics {
+                if position > apply_random_heuristics + 4 * RANDOM_HEURISTICS_WINDOW {
+                    let margin = (STORE_LOOKAHEAD - 1).max(4);
+                    let jump_end = (position + 16).min(end.saturating_sub(margin));
+                    while position < jump_end {
+                        hasher.store(input, position);
+                        position += 4;
+                        insert_length += 4;
+                    }
+                } else {
+                    let margin = (STORE_LOOKAHEAD - 1).max(2);
+                    let jump_end = (position + 8).min(end.saturating_sub(margin));
+                    while position < jump_end {
+                        hasher.store(input, position);
+                        position += 2;
+                        insert_length += 2;
+                    }
+                }
             }
         }
-        position = end;
-        literal_start = end;
     }
 
     Parse {
         commands,
-        tail_start: literal_start,
+        tail_start: insert_start,
     }
-}
-
-fn should_defer_match(
-    input: &[u8],
-    position: usize,
-    literal_start: usize,
-    previous_position: usize,
-    match_length: usize,
-    table: &[MatchBucket],
-) -> bool {
-    let next_position = position + 1;
-    if next_position + MIN_MATCH > input.len() {
-        return false;
-    }
-
-    let next_candidates = table[hash4(input, next_position)];
-    let Some((next_previous, next_length)) = best_match(input, next_position, &next_candidates)
-    else {
-        return false;
-    };
-
-    let insert_length = position - literal_start;
-    let current_gain =
-        estimated_match_gain(insert_length, match_length, position - previous_position);
-    let next_gain = estimated_match_gain(
-        insert_length + 1,
-        next_length,
-        next_position - next_previous,
-    ) - LITERAL_BIT_ESTIMATE;
-    next_gain > current_gain
-}
-
-fn estimated_match_gain(insert_length: usize, copy_length: usize, distance: usize) -> isize {
-    let command = ExplicitCommand::for_lengths(insert_length, copy_length);
-    let distance = DistanceCode::for_distance(distance, DIRECT_DISTANCE_CODES);
-    let copied_literal_bits = copy_length.saturating_mul(8) as isize;
-    let extra_bits =
-        isize::from(command.extra_bit_count()) + isize::from(distance.extra_bit_count());
-    copied_literal_bits - extra_bits
-}
-
-fn best_match(input: &[u8], position: usize, candidates: &MatchBucket) -> Option<(usize, usize)> {
-    let mut best_position = 0_usize;
-    let mut best_length = 0_usize;
-
-    for &previous in candidates {
-        if previous == EMPTY {
-            continue;
-        }
-        let previous_position = previous as usize;
-        if position - previous_position > MAX_BACKWARD_DISTANCE
-            || input[previous_position..previous_position + MIN_MATCH]
-                != input[position..position + MIN_MATCH]
-        {
-            continue;
-        }
-
-        let match_length = extend_match(input, previous_position, position);
-        if match_length > best_length
-            || (match_length == best_length && previous_position > best_position)
-        {
-            best_position = previous_position;
-            best_length = match_length;
-        }
-    }
-
-    (best_length >= MIN_MATCH).then_some((best_position, best_length))
-}
-
-fn insert_position(bucket: &mut MatchBucket, cursor: &mut u8, position: u32) {
-    bucket[usize::from(*cursor)] = position;
-    *cursor = (*cursor + 1) & (BUCKET_SIZE as u8 - 1);
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {
@@ -172,30 +300,37 @@ fn hash4(input: &[u8], position: usize) -> usize {
             .try_into()
             .expect("hash input has four bytes"),
     );
-    ((value.wrapping_mul(0x1e35_a7bd)) >> (32 - TABLE_BITS)) as usize
+    ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
 }
 
-fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
-    let mut length = MIN_MATCH;
-    let limit = input.len() - current;
+fn backward_reference_score(copy_length: usize, distance: usize) -> usize {
+    SCORE_BASE + LITERAL_BYTE_SCORE * copy_length
+        - DISTANCE_BIT_PENALTY * log2_floor_nonzero(distance)
+}
 
+fn score_using_last_distance(copy_length: usize) -> usize {
+    SCORE_BASE + LITERAL_BYTE_SCORE * copy_length + 15
+}
+
+fn last_distance_penalty(short_code: usize) -> usize {
+    39 + ((0x1ca10_usize >> (short_code & 0xe)) & 0xe)
+}
+
+fn log2_floor_nonzero(value: usize) -> usize {
+    debug_assert!(value != 0);
+    usize::BITS as usize - 1 - value.leading_zeros() as usize
+}
+
+fn match_length(input: &[u8], previous: usize, current: usize, limit: usize) -> usize {
+    let mut length = 0_usize;
     while length + MATCH_WORD_BYTES <= limit {
-        let previous_word = u64::from_ne_bytes(
-            input[previous + length..previous + length + MATCH_WORD_BYTES]
-                .try_into()
-                .expect("match word has eight bytes"),
-        );
-        let current_word = u64::from_ne_bytes(
-            input[current + length..current + length + MATCH_WORD_BYTES]
-                .try_into()
-                .expect("match word has eight bytes"),
-        );
-        if previous_word != current_word {
+        if input[previous + length..previous + length + MATCH_WORD_BYTES]
+            != input[current + length..current + length + MATCH_WORD_BYTES]
+        {
             break;
         }
         length += MATCH_WORD_BYTES;
     }
-
     while length < limit && input[previous + length] == input[current + length] {
         length += 1;
     }
@@ -205,72 +340,45 @@ fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        EMPTY, best_match, estimated_match_gain, extend_match, greedy_parse, insert_position,
+        BLOCK_BITS, BLOCK_SIZE, QualityFiveHasher, backward_reference_score,
+        create_backward_references, hash4, score_using_last_distance,
     };
 
     #[test]
-    fn finds_repeated_phrase() {
-        let source = b"prefix-prefix-suffix";
-        let parse = greedy_parse(source);
-        assert!(!parse.commands.is_empty());
+    fn q5_hasher_keeps_sixteen_most_recent_positions() {
+        let input = vec![b'a'; 64];
+        let mut hasher = QualityFiveHasher::new();
+        for position in 0..20 {
+            hasher.store(&input, position);
+        }
 
-        let first = parse.commands[0];
-        assert_eq!(first.insert_start, 0);
-        assert_eq!(first.insert_length, 7);
-        assert_eq!(first.distance, 7);
-        assert!(first.copy_length >= 7);
+        let key = hash4(&input, 0);
+        let start = key << BLOCK_BITS;
+        let mut positions = hasher.buckets[start..start + BLOCK_SIZE].to_vec();
+        positions.sort_unstable();
+        assert_eq!(positions, (4_u32..20).collect::<Vec<_>>());
     }
 
     #[test]
-    fn finds_overlapping_runs() {
-        let parse = greedy_parse(b"aaaaaaaaaaaaaaaa");
-        assert_eq!(parse.commands.len(), 1);
-        assert_eq!(parse.commands[0].insert_length, 1);
-        assert_eq!(parse.commands[0].copy_length, 15);
-        assert_eq!(parse.commands[0].distance, 1);
-        assert_eq!(parse.tail_start, 16);
+    fn last_distance_gets_reference_score_bonus() {
+        assert!(score_using_last_distance(8) > backward_reference_score(8, 4));
+    }
+
+    #[test]
+    fn initial_last_distance_is_encoded_implicitly() {
+        let parse = create_backward_references(b"abcdabcdabcd");
+        let first = parse.commands[0];
+        assert_eq!(first.insert_length, 4);
+        assert_eq!(first.distance, 4);
+        assert_eq!(first.distance_code, 0);
+        assert_eq!(first.copy_length, 8);
+        assert_eq!(parse.tail_start, 12);
     }
 
     #[test]
     fn incompressible_input_remains_literal_tail() {
-        let parse = greedy_parse(b"abcdefghijklmno");
+        let parse = create_backward_references(b"abcdefghijklmno");
         assert!(parse.commands.is_empty());
         assert_eq!(parse.tail_start, 0);
-    }
-
-    #[test]
-    fn match_gain_accounts_for_format_extra_bits() {
-        assert_eq!(estimated_match_gain(0, 7, 4), 56);
-        assert!(estimated_match_gain(0, 20, 4) > estimated_match_gain(0, 10, 4));
-        assert!(estimated_match_gain(0, 10, 4) > estimated_match_gain(0, 10, 100));
-    }
-
-    #[test]
-    fn ring_bucket_keeps_two_most_recent_positions() {
-        let mut bucket = [EMPTY; 2];
-        let mut cursor = 0;
-        for position in [2, 4, 7, 9, 10, 12] {
-            insert_position(&mut bucket, &mut cursor, position);
-        }
-        bucket.sort_unstable();
-        assert_eq!(bucket, [10, 12]);
-        assert_eq!(cursor, 0);
-    }
-
-    #[test]
-    fn selects_longest_candidate_then_nearest_tie() {
-        let source = b"abcdWXYZabcdQRSTabcdWXYZ";
-        let candidates = [0, 8];
-        assert_eq!(best_match(source, 16, &candidates), Some((0, 8)));
-
-        let tied = b"abcdxxxxabcdyyyyabcdzzzz";
-        let candidates = [0, 8];
-        assert_eq!(best_match(tied, 16, &candidates), Some((8, 4)));
-    }
-
-    #[test]
-    fn word_extension_stops_at_first_mismatch() {
-        let source = b"abcdefghijklmnopabcdefghijklXnop";
-        assert_eq!(extend_match(source, 0, 16), 12);
     }
 }

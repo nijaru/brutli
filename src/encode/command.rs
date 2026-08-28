@@ -25,6 +25,7 @@ struct LengthCode {
 pub(super) struct InsertCommand {
     pub(super) symbol: u16,
     insert: LengthCode,
+    copy: LengthCode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,25 +38,43 @@ pub(super) struct ExplicitCommand {
 impl InsertCommand {
     pub(super) fn for_length(length: usize) -> Self {
         let insert = length_code(length, &INSERT_BASE, &INSERT_EXTRA_BITS);
-        let symbol = terminal_command_symbol(insert.code);
-        Self { symbol, insert }
-    }
-
-    pub(super) fn write_extra(self, writer: &mut BitWriter) {
-        write_length_extra(writer, self.insert);
-    }
-}
-
-impl ExplicitCommand {
-    pub(super) fn for_lengths(insert_length: usize, copy_length: usize) -> Self {
-        let insert = length_code(insert_length, &INSERT_BASE, &INSERT_EXTRA_BITS);
-        let copy = length_code(copy_length, &COPY_BASE, &COPY_EXTRA_BITS);
-        let symbol = explicit_command_symbol(insert.code, copy.code);
+        let copy = length_code(4, &COPY_BASE, &COPY_EXTRA_BITS);
+        let symbol = combine_length_codes(insert.code, copy.code, false);
         Self {
             symbol,
             insert,
             copy,
         }
+    }
+
+    pub(super) fn write_extra(self, writer: &mut BitWriter) {
+        write_length_extra(writer, self.insert);
+        write_length_extra(writer, self.copy);
+    }
+}
+
+impl ExplicitCommand {
+    pub(super) fn for_lengths(insert_length: usize, copy_length: usize) -> Self {
+        Self::for_insert_and_copy_code(insert_length, copy_length, false)
+    }
+
+    pub(super) fn for_insert_and_copy_code(
+        insert_length: usize,
+        copy_length_code: usize,
+        use_last_distance: bool,
+    ) -> Self {
+        let insert = length_code(insert_length, &INSERT_BASE, &INSERT_EXTRA_BITS);
+        let copy = length_code(copy_length_code, &COPY_BASE, &COPY_EXTRA_BITS);
+        let symbol = combine_length_codes(insert.code, copy.code, use_last_distance);
+        Self {
+            symbol,
+            insert,
+            copy,
+        }
+    }
+
+    pub(super) const fn requires_distance(self) -> bool {
+        self.symbol >= 128
     }
 
     pub(super) const fn extra_bit_count(self) -> u8 {
@@ -85,32 +104,19 @@ fn length_code(length: usize, bases: &[usize; 24], extra_bits: &[u8; 24]) -> Len
     }
 }
 
-fn terminal_command_symbol(insert_code: usize) -> u16 {
-    let range = match insert_code / 8 {
-        0 => 0,
-        1 => 4,
-        2 => 7,
-        _ => unreachable!(),
-    };
-    (range * 64 + (insert_code % 8) * 8) as u16
-}
+fn combine_length_codes(insert_code: usize, copy_code: usize, use_last_distance: bool) -> u16 {
+    let low_bits = (copy_code & 7) | ((insert_code & 7) << 3);
+    if use_last_distance && insert_code < 8 && copy_code < 16 {
+        return (if copy_code < 8 {
+            low_bits
+        } else {
+            low_bits | 64
+        }) as u16;
+    }
 
-fn explicit_command_symbol(insert_code: usize, copy_code: usize) -> u16 {
-    let insert_group = insert_code / 8;
-    let copy_group = copy_code / 8;
-    let range = match (insert_group, copy_group) {
-        (0, 0) => 2,
-        (0, 1) => 3,
-        (1, 0) => 4,
-        (1, 1) => 5,
-        (0, 2) => 6,
-        (2, 0) => 7,
-        (1, 2) => 8,
-        (2, 1) => 9,
-        (2, 2) => 10,
-        _ => unreachable!(),
-    };
-    (range * 64 + (insert_code % 8) * 8 + copy_code % 8) as u16
+    let mut offset = 2 * ((copy_code >> 3) + 3 * (insert_code >> 3));
+    offset = (offset << 5) + 0x40 + ((0x520d40_usize >> offset) & 0xc0);
+    (offset | low_bits) as u16
 }
 
 fn write_length_extra(writer: &mut BitWriter, code: LengthCode) {
@@ -123,16 +129,15 @@ mod tests {
     use crate::encode::bit_writer::BitWriter;
 
     #[test]
-    fn maps_insert_code_groups_to_command_symbols() {
-        assert_eq!(InsertCommand::for_length(5).symbol, 40);
-        assert_eq!(InsertCommand::for_length(10).symbol, 256);
-        assert_eq!(InsertCommand::for_length(130).symbol, 448);
+    fn insert_commands_match_reference_length_combination() {
+        assert_eq!(InsertCommand::for_length(5).symbol, 170);
+        assert_eq!(InsertCommand::for_length(10).symbol, 258);
+        assert_eq!(InsertCommand::for_length(130).symbol, 450);
     }
 
     #[test]
     fn writes_insert_extra_bits() {
         let command = InsertCommand::for_length(147);
-        assert_eq!(command.symbol, 448);
 
         let mut writer = BitWriter::default();
         command.write_extra(&mut writer);
@@ -146,6 +151,17 @@ mod tests {
         assert_eq!(ExplicitCommand::for_lengths(130, 2).symbol, 448);
         assert_eq!(ExplicitCommand::for_lengths(10, 70).symbol, 512);
         assert_eq!(ExplicitCommand::for_lengths(130, 70).symbol, 640);
+    }
+
+    #[test]
+    fn last_distance_uses_compact_command_range() {
+        let command = ExplicitCommand::for_insert_and_copy_code(0, 2, true);
+        assert_eq!(command.symbol, 0);
+        assert!(!command.requires_distance());
+
+        let command = ExplicitCommand::for_insert_and_copy_code(5, 7, true);
+        assert_eq!(command.symbol, 45);
+        assert!(!command.requires_distance());
     }
 
     #[test]
