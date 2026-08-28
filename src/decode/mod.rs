@@ -7,6 +7,7 @@ mod command;
 mod complex_prefix_code;
 mod compressed_block;
 mod compressed_header;
+mod compressed_metablock;
 mod compressed_trees;
 mod context;
 mod context_map;
