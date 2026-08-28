@@ -34,7 +34,9 @@ enum State {
     RleValue,
     PrefixCode,
     Entries,
-    Repeat { bits: u8 },
+    Repeat {
+        bits: u8,
+    },
     Transform,
     Done,
 }
@@ -105,21 +107,15 @@ impl ContextMapDecoder {
                         .prefix_code
                         .as_ref()
                         .expect("context-map prefix code has been decoded");
-                    let Some(symbol) = code.decode(
-                        &mut self.symbol_decoder,
-                        reader,
-                        input,
-                        cursor,
-                    ) else {
+                    let Some(symbol) = code.decode(&mut self.symbol_decoder, reader, input, cursor)
+                    else {
                         return Ok(None);
                     };
 
                     if symbol == 0 {
                         self.map.push(0);
                     } else if symbol <= u16::from(self.rle_max) {
-                        self.state = State::Repeat {
-                            bits: symbol as u8,
-                        };
+                        self.state = State::Repeat { bits: symbol as u8 };
                     } else {
                         self.map.push((symbol - u16::from(self.rle_max)) as u8);
                     }
@@ -166,7 +162,10 @@ impl ContextMapDecoder {
             seen[index] = true;
         }
 
-        if seen[..usize::from(self.num_trees)].iter().all(|&value| value) {
+        if seen[..usize::from(self.num_trees)]
+            .iter()
+            .all(|&value| value)
+        {
             Ok(())
         } else {
             Err(ContextMapError::MissingTree)
