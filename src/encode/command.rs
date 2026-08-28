@@ -58,6 +58,10 @@ impl ExplicitCommand {
         }
     }
 
+    pub(super) const fn extra_bit_count(self) -> u8 {
+        self.insert.extra_bits + self.copy.extra_bits
+    }
+
     pub(super) fn write_extra(self, writer: &mut BitWriter) {
         write_length_extra(writer, self.insert);
         write_length_extra(writer, self.copy);
@@ -142,6 +146,12 @@ mod tests {
         assert_eq!(ExplicitCommand::for_lengths(130, 2).symbol, 448);
         assert_eq!(ExplicitCommand::for_lengths(10, 70).symbol, 512);
         assert_eq!(ExplicitCommand::for_lengths(130, 70).symbol, 640);
+    }
+
+    #[test]
+    fn reports_explicit_extra_bit_count() {
+        assert_eq!(ExplicitCommand::for_lengths(5, 7).extra_bit_count(), 0);
+        assert_eq!(ExplicitCommand::for_lengths(147, 79).extra_bit_count(), 12);
     }
 
     #[test]

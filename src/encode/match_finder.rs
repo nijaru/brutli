@@ -1,9 +1,12 @@
+use super::{DIRECT_DISTANCE_CODES, command::ExplicitCommand, distance::DistanceCode};
+
 const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
 const BUCKET_SIZE: usize = 2;
 const MIN_MATCH: usize = 4;
 const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
+const LITERAL_BIT_ESTIMATE: isize = 8;
 const EMPTY: u32 = u32::MAX;
 
 type MatchBucket = [u32; BUCKET_SIZE];
@@ -52,6 +55,18 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
             continue;
         };
 
+        if should_defer_match(
+            input,
+            position,
+            literal_start,
+            previous_position,
+            match_length,
+            &table,
+        ) {
+            position += 1;
+            continue;
+        }
+
         commands.push(MatchCommand {
             insert_start: literal_start,
             insert_length: position - literal_start,
@@ -74,6 +89,47 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         commands,
         tail_start: literal_start,
     }
+}
+
+fn should_defer_match(
+    input: &[u8],
+    position: usize,
+    literal_start: usize,
+    previous_position: usize,
+    match_length: usize,
+    table: &[MatchBucket],
+) -> bool {
+    let next_position = position + 1;
+    if next_position + MIN_MATCH > input.len() {
+        return false;
+    }
+
+    let next_candidates = table[hash4(input, next_position)];
+    let Some((next_previous, next_length)) = best_match(input, next_position, &next_candidates) else {
+        return false;
+    };
+
+    let insert_length = position - literal_start;
+    let current_gain = estimated_match_gain(
+        insert_length,
+        match_length,
+        position - previous_position,
+    );
+    let next_gain = estimated_match_gain(
+        insert_length + 1,
+        next_length,
+        next_position - next_previous,
+    ) - LITERAL_BIT_ESTIMATE;
+    next_gain > current_gain
+}
+
+fn estimated_match_gain(insert_length: usize, copy_length: usize, distance: usize) -> isize {
+    let command = ExplicitCommand::for_lengths(insert_length, copy_length);
+    let distance = DistanceCode::for_distance(distance, DIRECT_DISTANCE_CODES);
+    let copied_literal_bits = copy_length.saturating_mul(8) as isize;
+    let extra_bits =
+        isize::from(command.extra_bit_count()) + isize::from(distance.extra_bit_count());
+    copied_literal_bits - extra_bits
 }
 
 fn best_match(input: &[u8], position: usize, candidates: &MatchBucket) -> Option<(usize, usize)> {
@@ -147,7 +203,9 @@ fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{EMPTY, best_match, extend_match, greedy_parse, insert_position};
+    use super::{
+        EMPTY, best_match, estimated_match_gain, extend_match, greedy_parse, insert_position,
+    };
 
     #[test]
     fn finds_repeated_phrase() {
@@ -177,6 +235,13 @@ mod tests {
         let parse = greedy_parse(b"abcdefghijklmno");
         assert!(parse.commands.is_empty());
         assert_eq!(parse.tail_start, 0);
+    }
+
+    #[test]
+    fn match_gain_accounts_for_format_extra_bits() {
+        assert_eq!(estimated_match_gain(0, 7, 4), 56);
+        assert!(estimated_match_gain(0, 20, 4) > estimated_match_gain(0, 10, 4));
+        assert!(estimated_match_gain(0, 10, 4) > estimated_match_gain(0, 10, 100));
     }
 
     #[test]

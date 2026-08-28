@@ -107,6 +107,10 @@ impl DistanceCode {
         panic!("distance exceeds the RFC 7932 window range");
     }
 
+    pub(super) const fn extra_bit_count(self) -> u8 {
+        self.extra_bits
+    }
+
     pub(super) fn write_extra(self, writer: &mut BitWriter) {
         writer.write_bits(u64::from(self.extra), self.extra_bits);
     }
@@ -126,6 +130,7 @@ mod tests {
         for distance in 1..=4 {
             let code = DistanceCode::for_distance(distance, 4);
             assert_eq!(code.symbol, 15 + distance as u16);
+            assert_eq!(code.extra_bit_count(), 0);
 
             let mut writer = BitWriter::default();
             code.write_extra(&mut writer);
@@ -174,6 +179,11 @@ mod tests {
             let code = DistanceCode::for_distance(distance, 4);
             assert!((20..alphabet_size(4)).contains(&code.symbol));
         }
+    }
+
+    #[test]
+    fn reports_distance_extra_bits() {
+        assert_eq!(DistanceCode::for_distance(17, 4).extra_bit_count(), 3);
     }
 
     #[test]
