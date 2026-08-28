@@ -3,26 +3,33 @@ mod command;
 mod prefix_code;
 
 use bit_writer::BitWriter;
-use command::InsertCommand;
+use command::{ExplicitCommand, InsertCommand};
 use prefix_code::{write_simple_prefix_code, write_simple_symbol, write_var_len_u8};
 
 const DEFAULT_WINDOW_BITS: u8 = 22;
 const MAX_META_BLOCK_SIZE: usize = 1 << 24;
 const LITERAL_ALPHABET_SIZE: u16 = 256;
 const COMMAND_ALPHABET_SIZE: u16 = 704;
-const DISTANCE_ALPHABET_SIZE: u16 = 64;
+const BASE_DISTANCE_ALPHABET_SIZE: u16 = 64;
+const DIRECT_DISTANCE_CODES: u16 = 4;
+const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_DISTANCE_CODES;
 
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
-    let stored = compress_stored(input);
-    let Some(compressed) = try_simple_compressed(input) else {
-        return stored;
-    };
+    let mut best = compress_stored(input);
 
-    if compressed.len() < stored.len() {
-        compressed
-    } else {
-        stored
+    for candidate in [
+        try_simple_compressed(input),
+        try_periodic_compressed(input),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate.len() < best.len() {
+            best = candidate;
+        }
     }
+
+    best
 }
 
 fn compress_stored(input: &[u8]) -> Vec<u8> {
@@ -48,21 +55,67 @@ fn try_simple_compressed(input: &[u8]) -> Option<Vec<u8>> {
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
     write_final_compressed_header(&mut writer, input.len());
-    write_simple_compressed_header(&mut writer);
+    write_simple_compressed_header(&mut writer, 0);
 
     write_simple_prefix_code(&mut writer, &symbols, LITERAL_ALPHABET_SIZE);
     write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
-    write_simple_prefix_code(&mut writer, &[0], DISTANCE_ALPHABET_SIZE);
+    write_simple_prefix_code(&mut writer, &[0], BASE_DISTANCE_ALPHABET_SIZE);
 
     command.write_extra(&mut writer);
+    write_literals(&mut writer, input, &symbols);
+
+    Some(writer.finish())
+}
+
+fn try_periodic_compressed(input: &[u8]) -> Option<Vec<u8>> {
+    if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
+        return None;
+    }
+
+    let period = periodic_prefix_length(input)?;
+    let copy_length = input.len() - period;
+    let symbols = simple_literal_alphabet(&input[..period])?;
+    let command = ExplicitCommand::for_lengths(period, copy_length);
+    let distance_symbol = 15 + period as u16;
+
+    let mut writer = BitWriter::default();
+    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_final_compressed_header(&mut writer, input.len());
+    write_simple_compressed_header(&mut writer, DIRECT_DISTANCE_CODES);
+
+    write_simple_prefix_code(&mut writer, &symbols, LITERAL_ALPHABET_SIZE);
+    write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
+    write_simple_prefix_code(
+        &mut writer,
+        &[distance_symbol],
+        DIRECT_DISTANCE_ALPHABET_SIZE,
+    );
+
+    command.write_extra(&mut writer);
+    write_literals(&mut writer, &input[..period], &symbols);
+    // The one distance tree contains only this direct-distance symbol, so it
+    // emits no data bits and direct distance codes require no extra bits.
+
+    Some(writer.finish())
+}
+
+fn periodic_prefix_length(input: &[u8]) -> Option<usize> {
+    (1..=4).find(|&period| {
+        input.len() >= period + 2
+            && input[period..]
+                .iter()
+                .enumerate()
+                .all(|(index, &byte)| byte == input[index % period])
+    })
+}
+
+fn write_literals(writer: &mut BitWriter, input: &[u8], symbols: &[u16]) {
     for &byte in input {
         let index = symbols
             .binary_search(&u16::from(byte))
             .expect("literal alphabet was built from the input");
-        write_simple_symbol(&mut writer, index, symbols.len());
+        write_simple_symbol(writer, index, symbols.len());
     }
-
-    Some(writer.finish())
 }
 
 fn simple_literal_alphabet(input: &[u8]) -> Option<Vec<u16>> {
@@ -119,12 +172,14 @@ fn write_final_compressed_header(writer: &mut BitWriter, length: usize) {
     writer.write_bits((length - 1) as u64, nibbles * 4); // MLEN - 1
 }
 
-fn write_simple_compressed_header(writer: &mut BitWriter) {
+fn write_simple_compressed_header(writer: &mut BitWriter, direct_distance_codes: u16) {
+    debug_assert!(direct_distance_codes <= 15);
+
     write_var_len_u8(writer, 0); // one literal block type
     write_var_len_u8(writer, 0); // one insert-and-copy block type
     write_var_len_u8(writer, 0); // one distance block type
     writer.write_bits(0, 2); // NPOSTFIX
-    writer.write_bits(0, 4); // NDIRECT
+    writer.write_bits(u64::from(direct_distance_codes), 4); // NDIRECT
     writer.write_bits(0, 2); // literal context mode
     write_var_len_u8(writer, 0); // one literal tree
     write_var_len_u8(writer, 0); // one distance tree
@@ -161,7 +216,8 @@ fn nibbles_for_length(length: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length, simple_literal_alphabet,
+        MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length, periodic_prefix_length,
+        simple_literal_alphabet, try_periodic_compressed, try_simple_compressed,
     };
     use crate::{DecodeError, Decoder, decompress};
 
@@ -186,10 +242,31 @@ mod tests {
             b"abcabcabcabcabca".as_slice(),
             b"abcdabcdabcdabcd".as_slice(),
         ] {
-            let encoded = compress(source);
+            let encoded = try_simple_compressed(source).unwrap();
             assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
             assert!(encoded.len() < compress_stored(source).len());
         }
+    }
+
+    #[test]
+    fn periodic_copy_round_trips_for_direct_distances() {
+        for source in [
+            b"aaaaaaaaaaaaaaaa".as_slice(),
+            b"abababababababab".as_slice(),
+            b"abcabcabcabcabca".as_slice(),
+            b"abcdabcdabcdabcd".as_slice(),
+        ] {
+            let encoded = try_periodic_compressed(source).unwrap();
+            assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn periodic_copy_beats_literal_only_on_long_patterns() {
+        let source = b"abcd".repeat(4096);
+        let periodic = try_periodic_compressed(&source).unwrap();
+        let literals = try_simple_compressed(&source).unwrap();
+        assert!(periodic.len() < literals.len());
     }
 
     #[test]
@@ -251,6 +328,15 @@ mod tests {
                 max_window_bits: 21,
             })
         );
+    }
+
+    #[test]
+    fn detects_periods_up_to_four_bytes() {
+        assert_eq!(periodic_prefix_length(b"aaaaaaaa"), Some(1));
+        assert_eq!(periodic_prefix_length(b"abababab"), Some(2));
+        assert_eq!(periodic_prefix_length(b"abcabcabc"), Some(3));
+        assert_eq!(periodic_prefix_length(b"abcdabcd"), Some(4));
+        assert_eq!(periodic_prefix_length(b"abcdeabcde"), None);
     }
 
     #[test]
