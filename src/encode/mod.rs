@@ -4,7 +4,9 @@ mod prefix_code;
 
 use bit_writer::BitWriter;
 use command::{ExplicitCommand, InsertCommand};
-use prefix_code::{write_simple_prefix_code, write_simple_symbol, write_var_len_u8};
+use prefix_code::{
+    PrefixEncoding, write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
+};
 
 const DEFAULT_WINDOW_BITS: u8 = 22;
 const MAX_META_BLOCK_SIZE: usize = 1 << 24;
@@ -17,9 +19,13 @@ const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
     let mut best = compress_stored(input);
 
-    for candidate in [try_simple_compressed(input), try_periodic_compressed(input)]
-        .into_iter()
-        .flatten()
+    for candidate in [
+        try_simple_compressed(input),
+        try_general_literal_compressed(input),
+        try_periodic_compressed(input),
+    ]
+    .into_iter()
+    .flatten()
     {
         if candidate.len() < best.len() {
             best = candidate;
@@ -60,6 +66,39 @@ fn try_simple_compressed(input: &[u8]) -> Option<Vec<u8>> {
 
     command.write_extra(&mut writer);
     write_literals(&mut writer, input, &symbols);
+
+    Some(writer.finish())
+}
+
+fn try_general_literal_compressed(input: &[u8]) -> Option<Vec<u8>> {
+    if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
+        return None;
+    }
+
+    let mut frequencies = [0_usize; LITERAL_ALPHABET_SIZE as usize];
+    for &byte in input {
+        frequencies[usize::from(byte)] += 1;
+    }
+    if frequencies.iter().filter(|&&frequency| frequency != 0).count() <= 4 {
+        return None;
+    }
+
+    let literal_code = PrefixEncoding::from_frequencies(&frequencies)?;
+    let command = InsertCommand::for_length(input.len());
+
+    let mut writer = BitWriter::default();
+    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_final_compressed_header(&mut writer, input.len());
+    write_simple_compressed_header(&mut writer, 0);
+
+    literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
+    write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
+    write_simple_prefix_code(&mut writer, &[0], BASE_DISTANCE_ALPHABET_SIZE);
+
+    command.write_extra(&mut writer);
+    for &byte in input {
+        literal_code.write_symbol(&mut writer, u16::from(byte));
+    }
 
     Some(writer.finish())
 }
@@ -214,7 +253,8 @@ fn nibbles_for_length(length: usize) -> u8 {
 mod tests {
     use super::{
         MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length, periodic_prefix_length,
-        simple_literal_alphabet, try_periodic_compressed, try_simple_compressed,
+        simple_literal_alphabet, try_general_literal_compressed, try_periodic_compressed,
+        try_simple_compressed,
     };
     use crate::{DecodeError, Decoder, decompress};
 
@@ -243,6 +283,30 @@ mod tests {
             assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
             assert!(encoded.len() < compress_stored(source).len());
         }
+    }
+
+    #[test]
+    fn complex_literal_stream_round_trips() {
+        let source = b"the quick brown fox jumps over the lazy dog. ".repeat(256);
+        let encoded = try_general_literal_compressed(&source).unwrap();
+
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+        assert!(encoded.len() < compress_stored(&source).len());
+    }
+
+    #[test]
+    fn reference_decoder_accepts_complex_literal_output() {
+        let source = b"complex canonical literal trees interoperate with Brotli. ".repeat(256);
+        let encoded = try_general_literal_compressed(&source).unwrap();
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
+
+        assert!(matches!(
+            info.result,
+            brotli_decompressor::BrotliResult::ResultSuccess
+        ));
+        assert_eq!(info.decoded_size, source.len());
+        assert_eq!(&decoded[..info.decoded_size], source);
     }
 
     #[test]
