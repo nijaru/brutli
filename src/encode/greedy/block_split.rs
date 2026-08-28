@@ -13,12 +13,11 @@ const LITERAL_ALPHABET_SIZE: usize = 256;
 const BLOCK_LENGTH_ALPHABET_SIZE: usize = 26;
 
 const BLOCK_LENGTH_OFFSETS: [usize; BLOCK_LENGTH_ALPHABET_SIZE] = [
-    1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305, 369, 497,
-    753, 1265, 2289, 4337, 8433, 16625,
+    1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305, 369, 497, 753, 1265,
+    2289, 4337, 8433, 16625,
 ];
 const BLOCK_LENGTH_EXTRA_BITS: [u8; BLOCK_LENGTH_ALPHABET_SIZE] = [
-    2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13,
-    24,
+    2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13, 24,
 ];
 
 type LiteralHistogram = [usize; LITERAL_ALPHABET_SIZE];
@@ -99,9 +98,7 @@ impl BlockSplitEncoding {
         let mut type_frequencies = vec![0_usize; split.num_types + 2];
         let mut length_frequencies = vec![0_usize; BLOCK_LENGTH_ALPHABET_SIZE];
         let mut calculator = BlockTypeCodeCalculator::new();
-        for (index, (&block_type, &length)) in
-            split.types.iter().zip(&split.lengths).enumerate()
-        {
+        for (index, (&block_type, &length)) in split.types.iter().zip(&split.lengths).enumerate() {
             let type_symbol = calculator.next(block_type);
             if index != 0 {
                 type_frequencies[usize::from(type_symbol)] += 1;
@@ -217,8 +214,8 @@ pub(super) fn split_literals(data: &[u8]) -> LiteralSplit {
         return LiteralSplit::single(data.len());
     }
 
-    let mut num_histograms = (data.len() / SYMBOLS_PER_LITERAL_HISTOGRAM + 1)
-        .min(MAX_LITERAL_HISTOGRAMS);
+    let mut num_histograms =
+        (data.len() / SYMBOLS_PER_LITERAL_HISTOGRAM + 1).min(MAX_LITERAL_HISTOGRAMS);
     if num_histograms == 1 {
         return LiteralSplit::single(data.len());
     }
@@ -244,10 +241,7 @@ pub(super) fn write_trivial_context_map(
     num_types: usize,
     context_bits: usize,
 ) -> Option<()> {
-    write_var_len_u8(
-        writer,
-        u8::try_from(num_types.checked_sub(1)?).ok()?,
-    );
+    write_var_len_u8(writer, u8::try_from(num_types.checked_sub(1)?).ok()?);
     if num_types == 1 {
         return Some(());
     }
@@ -274,7 +268,10 @@ pub(super) fn write_trivial_context_map(
         };
         code.write_symbol(writer, u16::try_from(symbol).ok()?);
         code.write_symbol(writer, u16::try_from(repeat_code).ok()?);
-        writer.write_bits(u64::try_from(repeat_bits).ok()?, u8::try_from(repeat_code).ok()?);
+        writer.write_bits(
+            u64::try_from(repeat_bits).ok()?,
+            u8::try_from(repeat_code).ok()?,
+        );
     }
     writer.write_bits(1, 1); // inverse move-to-front
     Some(())
@@ -292,10 +289,7 @@ fn initial_entropy_codes(data: &[u8], num_histograms: usize) -> Vec<LiteralHisto
         if position + LITERAL_STRIDE_LENGTH >= data.len() {
             position = data.len() - LITERAL_STRIDE_LENGTH - 1;
         }
-        add_vector(
-            histogram,
-            &data[position..position + LITERAL_STRIDE_LENGTH],
-        );
+        add_vector(histogram, &data[position..position + LITERAL_STRIDE_LENGTH]);
     }
     histograms
 }
@@ -314,12 +308,7 @@ fn refine_entropy_codes(data: &[u8], histograms: &mut [LiteralHistogram]) {
     }
 }
 
-fn random_sample(
-    seed: &mut u32,
-    data: &[u8],
-    mut stride: usize,
-    histogram: &mut LiteralHistogram,
-) {
+fn random_sample(seed: &mut u32, data: &[u8], mut stride: usize, histogram: &mut LiteralHistogram) {
     let position = if stride >= data.len() {
         stride = data.len();
         0
@@ -362,10 +351,10 @@ fn find_blocks(
     for (position, &symbol) in data.iter().enumerate() {
         let insert_offset = usize::from(symbol) * num_histograms;
         let mut minimum_cost = f64::INFINITY;
-        for histogram_index in 0..num_histograms {
-            costs[histogram_index] += insert_cost[insert_offset + histogram_index];
-            if costs[histogram_index] < minimum_cost {
-                minimum_cost = costs[histogram_index];
+        for (histogram_index, cost) in costs.iter_mut().enumerate() {
+            *cost += insert_cost[insert_offset + histogram_index];
+            if *cost < minimum_cost {
+                minimum_cost = *cost;
                 block_ids[position] = histogram_index as u8;
             }
         }
@@ -379,8 +368,7 @@ fn find_blocks(
             *cost -= minimum_cost;
             if *cost >= switch_cost {
                 *cost = switch_cost;
-                switch_signal[signal_offset + histogram_index / 8] |=
-                    1_u8 << (histogram_index & 7);
+                switch_signal[signal_offset + histogram_index / 8] |= 1_u8 << (histogram_index & 7);
             }
         }
     }
@@ -418,11 +406,7 @@ fn remap_block_ids(block_ids: &mut [u8], num_histograms: usize) -> usize {
     usize::from(next_id)
 }
 
-fn build_histograms(
-    data: &[u8],
-    block_ids: &[u8],
-    num_histograms: usize,
-) -> Vec<LiteralHistogram> {
+fn build_histograms(data: &[u8], block_ids: &[u8], num_histograms: usize) -> Vec<LiteralHistogram> {
     let mut histograms = vec![[0_usize; LITERAL_ALPHABET_SIZE]; num_histograms];
     for (&symbol, &block_id) in data.iter().zip(block_ids) {
         histograms[usize::from(block_id)][usize::from(symbol)] += 1;
@@ -495,13 +479,11 @@ fn write_block_length(writer: &mut BitWriter, code: &PrefixEncoding, length: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BlockTypeCodeCalculator, LiteralSplit, block_length_code, split_literals,
-    };
+    use super::{BlockTypeCodeCalculator, LiteralSplit, block_length_code, split_literals};
 
     #[test]
     fn short_literal_stream_uses_one_type() {
-        let split = split_literals(&vec![b'a'; 127]);
+        let split = split_literals(&[b'a'; 127]);
         assert_eq!(split.num_types(), 1);
         assert_eq!(split.lengths, [127]);
     }
@@ -509,7 +491,7 @@ mod tests {
     #[test]
     fn q5_splitter_separates_different_literal_regions() {
         let mut data = vec![b'a'; 4096];
-        data.extend(vec![b'z'; 4096]);
+        data.resize(8192, b'z');
         let split = split_literals(&data);
         assert!(split.num_types() >= 2);
         assert_eq!(split.lengths.iter().sum::<usize>(), data.len());
