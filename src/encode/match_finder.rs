@@ -117,11 +117,8 @@ fn should_defer_match(
 
     let insert_length = position - literal_start;
     let current_gain = estimated_match_gain(insert_length, current.copy_length, current.distance);
-    let next_gain = estimated_match_gain(
-        insert_length + 1,
-        next.copy_length,
-        next.distance,
-    ) - LITERAL_BIT_ESTIMATE;
+    let next_gain = estimated_match_gain(insert_length + 1, next.copy_length, next.distance)
+        - LITERAL_BIT_ESTIMATE;
     next_gain > current_gain
 }
 
@@ -140,16 +137,14 @@ fn best_candidate(
         return lz77;
     }
 
-    let dictionary = dictionary::best_identity_match(
-        input,
-        position,
-        position.min(MAX_BACKWARD_DISTANCE),
-    )
-    .map(|matched| Candidate {
-        copy_length: matched.length,
-        distance: matched.distance,
-        is_dictionary: true,
-    });
+    let dictionary =
+        dictionary::best_identity_match(input, position, position.min(MAX_BACKWARD_DISTANCE)).map(
+            |matched| Candidate {
+                copy_length: matched.length,
+                distance: matched.distance,
+                is_dictionary: true,
+            },
+        );
 
     choose_candidate(position - literal_start, lz77, dictionary)
 }
@@ -164,11 +159,8 @@ fn choose_candidate(
         (Some(candidate), None) | (None, Some(candidate)) => Some(candidate),
         (Some(lz77), Some(dictionary)) => {
             let lz77_gain = estimated_match_gain(insert_length, lz77.copy_length, lz77.distance);
-            let dictionary_gain = estimated_match_gain(
-                insert_length,
-                dictionary.copy_length,
-                dictionary.distance,
-            );
+            let dictionary_gain =
+                estimated_match_gain(insert_length, dictionary.copy_length, dictionary.distance);
             if dictionary_gain > lz77_gain
                 || (dictionary_gain == lz77_gain && dictionary.copy_length > lz77.copy_length)
             {
