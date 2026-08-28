@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::sync::LazyLock;
 
+use brutli::DecodeStatus;
 use divan::counter::BytesCount;
 
 struct Case {
@@ -20,6 +21,15 @@ impl Case {
             "Brutli benchmark fixture failed validation"
         );
 
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let decoded_size = brutli_decode_into(&compressed, &mut decoded);
+        assert_eq!(decoded_size, source.len());
+        assert_eq!(
+            &decoded[..decoded_size],
+            source,
+            "Brutli direct-slice fixture failed validation"
+        );
+
         let mut reader = brotli::Decompressor::new(compressed.as_slice(), 4096);
         let mut decoded = Vec::with_capacity(source.len());
         reader.read_to_end(&mut decoded).unwrap();
@@ -34,6 +44,21 @@ impl Case {
         assert_eq!(
             decoded, source,
             "rust-brotli stream-copy fixture failed validation"
+        );
+
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let info = brotli_decompressor::brotli_decode(&compressed, &mut decoded);
+        assert_eq!(
+            info.result,
+            brotli_decompressor::BrotliResult::ResultSuccess,
+            "rust-brotli direct-slice fixture failed: {:?}",
+            info.error_code
+        );
+        assert_eq!(info.decoded_size, source.len());
+        assert_eq!(
+            &decoded[..info.decoded_size],
+            source,
+            "rust-brotli direct-slice fixture failed validation"
         );
 
         Self { source, compressed }
@@ -66,11 +91,57 @@ fn main() {
     divan::main();
 }
 
+fn brutli_decode_into(input: &[u8], output: &mut [u8]) -> usize {
+    let mut decoder = brutli::Decoder::new();
+    let mut input_offset = 0;
+    let mut output_offset = 0;
+    let mut finishing = false;
+
+    loop {
+        let progress = if finishing {
+            decoder.finish(&mut output[output_offset..]).unwrap()
+        } else {
+            decoder
+                .process(&input[input_offset..], &mut output[output_offset..])
+                .unwrap()
+        };
+
+        if !finishing {
+            input_offset += progress.consumed;
+        }
+        output_offset += progress.produced;
+
+        match progress.status {
+            DecodeStatus::Done => {
+                assert_eq!(input_offset, input.len());
+                return output_offset;
+            }
+            DecodeStatus::NeedInput => {
+                assert_eq!(input_offset, input.len());
+                finishing = true;
+            }
+            DecodeStatus::NeedOutput => {
+                assert!(output_offset < output.len(), "direct-slice output buffer exhausted");
+            }
+        }
+    }
+}
+
 fn bench_brutli_one_shot(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| {
             brutli::decompress(divan::black_box(&case.compressed), case.source.len()).unwrap()
+        });
+}
+
+fn bench_brutli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    bencher
+        .counter(BytesCount::new(case.source.len()))
+        .bench(|| {
+            let mut output = vec![0_u8; case.source.len() + 1];
+            let decoded_size = brutli_decode_into(divan::black_box(&case.compressed), &mut output);
+            divan::black_box((output, decoded_size))
         });
 }
 
@@ -83,6 +154,19 @@ fn bench_brutli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
             let mut output = Vec::with_capacity(case.source.len());
             decoder.read_to_end(&mut output).unwrap();
             output
+        });
+}
+
+fn bench_rust_brotli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    bencher
+        .counter(BytesCount::new(case.source.len()))
+        .bench(|| {
+            let mut output = vec![0_u8; case.source.len() + 1];
+            let info = brotli_decompressor::brotli_decode(
+                divan::black_box(&case.compressed),
+                &mut output,
+            );
+            divan::black_box((output, info.decoded_size))
         });
 }
 
@@ -120,8 +204,18 @@ macro_rules! decode_benches {
             }
 
             #[divan::bench]
+            fn brutli_direct(bencher: divan::Bencher<'_, '_>) {
+                bench_brutli_direct(bencher, &$case);
+            }
+
+            #[divan::bench]
             fn brutli_reader(bencher: divan::Bencher<'_, '_>) {
                 bench_brutli_reader(bencher, &$case);
+            }
+
+            #[divan::bench]
+            fn rust_brotli_direct(bencher: divan::Bencher<'_, '_>) {
+                bench_rust_brotli_direct(bencher, &$case);
             }
 
             #[divan::bench]
