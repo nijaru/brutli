@@ -73,7 +73,8 @@ fn decodes_reference_encoder_across_all_qualities() {
                 let compressed = compress_reference(expected, quality, lgwin);
                 let decoded = decode_stream(&compressed);
                 assert_eq!(
-                    decoded, *expected,
+                    decoded,
+                    *expected,
                     "quality={quality} lgwin={lgwin} corpus={corpus_index} compressed_len={}",
                     compressed.len()
                 );
