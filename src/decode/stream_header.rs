@@ -10,6 +10,7 @@ impl StreamHeader {
         self.window_bits
     }
 
+    #[cfg(test)]
     pub(super) fn window_size(self) -> usize {
         (1_usize << self.window_bits) - 16
     }
