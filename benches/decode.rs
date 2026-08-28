@@ -121,7 +121,7 @@ fn brutli_decode_into_chunked(input: &[u8], output: &mut [u8], max_chunk: usize)
 
     let mut decoder = brutli::Decoder::new();
     let mut input_offset = 0;
-    let mut output_offset = 0;
+    let mut output_offset = 0_usize;
     let mut finishing = false;
 
     loop {
