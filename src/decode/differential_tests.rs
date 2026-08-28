@@ -63,6 +63,33 @@ fn corpora() -> Vec<Vec<u8>> {
     ]
 }
 
+fn large_corpus(size: usize) -> Vec<u8> {
+    const PATTERN: &[u8] =
+        b"Brotli history should wrap repeatedly while preserving exact LZ77 distance semantics. ";
+
+    let mut output = Vec::with_capacity(size);
+    let mut state = 0x9e37_79b9_u32;
+    let mut block = 0_u8;
+
+    while output.len() < size {
+        for index in 0..768_usize {
+            output.push(PATTERN[index % PATTERN.len()].wrapping_add(block & 3));
+        }
+
+        for _ in 0..256 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            output.push(state as u8);
+        }
+
+        block = block.wrapping_add(1);
+    }
+
+    output.truncate(size);
+    output
+}
+
 #[test]
 fn decodes_reference_encoder_across_all_qualities() {
     let corpora = corpora();
@@ -80,5 +107,25 @@ fn decodes_reference_encoder_across_all_qualities() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn decodes_large_reference_streams_across_repeated_history_wraps() {
+    for (quality, lgwin, size) in [
+        (0_u32, 10_u32, 2 * 1024 * 1024),
+        (5, 10, 768 * 1024),
+        (9, 16, 1024 * 1024),
+        (11, 22, 256 * 1024),
+    ] {
+        let expected = large_corpus(size);
+        let compressed = compress_reference(&expected, quality, lgwin);
+        let decoded = decode_stream(&compressed);
+        assert_eq!(
+            decoded,
+            expected,
+            "quality={quality} lgwin={lgwin} size={size} compressed_len={}",
+            compressed.len()
+        );
     }
 }
