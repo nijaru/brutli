@@ -36,6 +36,7 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
     }
 
     let mut table = vec![[EMPTY; BUCKET_SIZE]; TABLE_SIZE];
+    let mut cursors = vec![0_u8; TABLE_SIZE];
     let mut commands = Vec::new();
     let mut position = 0_usize;
     let mut literal_start = 0_usize;
@@ -43,7 +44,7 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
     while position + MIN_MATCH <= input.len() {
         let key = hash4(input, position);
         let candidates = table[key];
-        insert_position(&mut table[key], position as u32);
+        insert_position(&mut table[key], &mut cursors[key], position as u32);
 
         let Some((previous_position, match_length)) = best_match(input, position, &candidates)
         else {
@@ -61,8 +62,8 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         let end = position + match_length;
         for skipped in position + 1..end {
             if skipped + MIN_MATCH <= input.len() {
-                let bucket = &mut table[hash4(input, skipped)];
-                insert_position(bucket, skipped as u32);
+                let key = hash4(input, skipped);
+                insert_position(&mut table[key], &mut cursors[key], skipped as u32);
             }
         }
         position = end;
@@ -103,14 +104,9 @@ fn best_match(input: &[u8], position: usize, candidates: &MatchBucket) -> Option
     (best_length >= MIN_MATCH).then_some((best_position, best_length))
 }
 
-fn insert_position(bucket: &mut MatchBucket, position: u32) {
-    let mut replace = 0;
-    for index in 1..BUCKET_SIZE {
-        if bucket[replace] != EMPTY && (bucket[index] == EMPTY || bucket[index] < bucket[replace]) {
-            replace = index;
-        }
-    }
-    bucket[replace] = position;
+fn insert_position(bucket: &mut MatchBucket, cursor: &mut u8, position: u32) {
+    bucket[usize::from(*cursor)] = position;
+    *cursor = (*cursor + 1) & (BUCKET_SIZE as u8 - 1);
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {
@@ -184,13 +180,15 @@ mod tests {
     }
 
     #[test]
-    fn bucket_keeps_four_most_recent_positions() {
+    fn ring_bucket_keeps_four_most_recent_positions() {
         let mut bucket = [EMPTY; 4];
+        let mut cursor = 0;
         for position in [9, 2, 7, 4, 12, 10] {
-            insert_position(&mut bucket, position);
+            insert_position(&mut bucket, &mut cursor, position);
         }
         bucket.sort_unstable();
         assert_eq!(bucket, [7, 9, 10, 12]);
+        assert_eq!(cursor, 2);
     }
 
     #[test]
