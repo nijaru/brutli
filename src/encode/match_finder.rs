@@ -105,16 +105,14 @@ fn should_defer_match(
     }
 
     let next_candidates = table[hash4(input, next_position)];
-    let Some((next_previous, next_length)) = best_match(input, next_position, &next_candidates) else {
+    let Some((next_previous, next_length)) = best_match(input, next_position, &next_candidates)
+    else {
         return false;
     };
 
     let insert_length = position - literal_start;
-    let current_gain = estimated_match_gain(
-        insert_length,
-        match_length,
-        position - previous_position,
-    );
+    let current_gain =
+        estimated_match_gain(insert_length, match_length, position - previous_position);
     let next_gain = estimated_match_gain(
         insert_length + 1,
         next_length,
