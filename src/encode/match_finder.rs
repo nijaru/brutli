@@ -1,8 +1,8 @@
 use super::{DIRECT_DISTANCE_CODES, command::ExplicitCommand, distance::DistanceCode};
 
-const TABLE_BITS: usize = 14;
+const TABLE_BITS: usize = 15;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
-const BUCKET_SIZE: usize = 8;
+const BUCKET_SIZE: usize = 4;
 const MIN_MATCH: usize = 4;
 const MAX_LAZY_MATCH: usize = 16;
 const MATCH_WORD_BYTES: usize = 8;
@@ -253,16 +253,17 @@ mod tests {
     }
 
     #[test]
-    fn ring_bucket_keeps_eight_most_recent_positions() {
+    fn ring_bucket_keeps_most_recent_positions() {
         let mut bucket = MatchBucket::EMPTY;
-        for position in 0..12 {
+        for position in 0..BUCKET_SIZE as u32 + 4 {
             bucket.insert(position);
         }
-        let mut positions = bucket.positions;
+        let mut positions = bucket.positions.to_vec();
         positions.sort_unstable();
-        assert_eq!(positions, [4, 5, 6, 7, 8, 9, 10, 11]);
+        let expected: Vec<u32> = (4..BUCKET_SIZE as u32 + 4).collect();
+        assert_eq!(positions, expected);
         assert_eq!(usize::from(bucket.len), BUCKET_SIZE);
-        assert_eq!(bucket.next, 4);
+        assert_eq!(bucket.next, 0);
     }
 
     #[test]
