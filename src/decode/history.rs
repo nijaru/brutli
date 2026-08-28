@@ -122,10 +122,11 @@ impl History {
         }
 
         let start = (self.write + self.ring_size - distance) & self.ring_mask;
-        let first = output.len().min(self.ring_size - start);
+        let output_len = output.len();
+        let first = output_len.min(self.ring_size - start);
         output[..first].copy_from_slice(&self.buffer[start..start + first]);
-        if first < output.len() {
-            output[first..].copy_from_slice(&self.buffer[..output.len() - first]);
+        if first < output_len {
+            output[first..].copy_from_slice(&self.buffer[..output_len - first]);
         }
     }
 
