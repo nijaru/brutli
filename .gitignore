@@ -14,8 +14,8 @@ target
 **/mutants.out*/
 
 # Local Linux profiling output
-perf-brutli-binary.data
-perf-brutli-binary.txt
+perf-brutli-*.data
+perf-brutli-*.txt
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
