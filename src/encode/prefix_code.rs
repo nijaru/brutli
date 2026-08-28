@@ -1,5 +1,3 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
-
 use super::bit_writer::BitWriter;
 
 const MAX_CODE_BITS: usize = 15;
@@ -9,6 +7,13 @@ const CODE_LENGTH_ORDER: [u8; 18] = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 1
 struct SymbolCode {
     code: u16,
     bits: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HuffmanNode {
+    total_count: u128,
+    children: Option<(usize, usize)>,
+    symbol: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,8 +49,7 @@ impl PrefixEncoding {
             });
         }
 
-        let lengths =
-            huffman_code_lengths(frequencies).unwrap_or_else(|| balanced_code_lengths(frequencies));
+        let lengths = huffman_code_lengths(frequencies);
         let codes = canonical_codes(&lengths);
         symbols.sort_unstable();
         Some(Self {
@@ -85,60 +89,103 @@ impl PrefixEncoding {
     }
 }
 
-fn huffman_code_lengths(frequencies: &[usize]) -> Option<Vec<u8>> {
+fn huffman_code_lengths(frequencies: &[usize]) -> Vec<u8> {
     let active_count = frequencies
         .iter()
         .filter(|&&frequency| frequency != 0)
         .count();
     debug_assert!(active_count > 4);
 
-    let mut parents = Vec::with_capacity(active_count * 2 - 1);
-    let mut leaves = Vec::with_capacity(active_count);
-    let mut heap = BinaryHeap::with_capacity(active_count);
-
-    for (symbol, &frequency) in frequencies.iter().enumerate() {
-        if frequency == 0 {
-            continue;
-        }
-
-        let symbol = u16::try_from(symbol).expect("alphabet fits in u16");
-        let node = parents.len();
-        parents.push(None);
-        leaves.push((symbol, node));
-        heap.push(Reverse((frequency as u128, symbol, node)));
-    }
-
-    while heap.len() > 1 {
-        let Reverse((left_weight, left_symbol, left_node)) =
-            heap.pop().expect("Huffman heap contains left child");
-        let Reverse((right_weight, right_symbol, right_node)) =
-            heap.pop().expect("Huffman heap contains right child");
-        let parent = parents.len();
-        parents[left_node] = Some(parent);
-        parents[right_node] = Some(parent);
-        parents.push(None);
-        heap.push(Reverse((
-            left_weight + right_weight,
-            left_symbol.min(right_symbol),
-            parent,
-        )));
-    }
-
-    let mut lengths = vec![0_u8; frequencies.len()];
-    for (symbol, mut node) in leaves {
-        let mut depth = 0_usize;
-        while let Some(parent) = parents[node] {
-            depth += 1;
-            if depth > MAX_CODE_BITS {
-                return None;
+    let mut count_limit = 1_u128;
+    loop {
+        let mut nodes = Vec::with_capacity(active_count * 2 - 1);
+        for (symbol, &frequency) in frequencies.iter().enumerate() {
+            if frequency == 0 {
+                continue;
             }
-            node = parent;
+            nodes.push(HuffmanNode {
+                total_count: (frequency as u128).max(count_limit),
+                children: None,
+                symbol: Some(u16::try_from(symbol).expect("alphabet fits in u16")),
+            });
         }
-        lengths[usize::from(symbol)] = depth as u8;
+        nodes.sort_unstable_by(|left, right| {
+            left.total_count.cmp(&right.total_count).then_with(|| {
+                right
+                    .symbol
+                    .expect("leaf has symbol")
+                    .cmp(&left.symbol.expect("leaf has symbol"))
+            })
+        });
+
+        let leaf_count = nodes.len();
+        let mut next_leaf = 0_usize;
+        let mut next_parent = leaf_count;
+        for _ in 1..leaf_count {
+            let left = take_smallest_node(
+                &nodes,
+                leaf_count,
+                &mut next_leaf,
+                &mut next_parent,
+            );
+            let right = take_smallest_node(
+                &nodes,
+                leaf_count,
+                &mut next_leaf,
+                &mut next_parent,
+            );
+            nodes.push(HuffmanNode {
+                total_count: nodes[left].total_count + nodes[right].total_count,
+                children: Some((left, right)),
+                symbol: None,
+            });
+        }
+
+        let mut lengths = vec![0_u8; frequencies.len()];
+        let mut stack = vec![(nodes.len() - 1, 0_usize)];
+        let mut fits = true;
+        while let Some((node_index, depth)) = stack.pop() {
+            let node = nodes[node_index];
+            if let Some((left, right)) = node.children {
+                let child_depth = depth + 1;
+                if child_depth > MAX_CODE_BITS {
+                    fits = false;
+                    break;
+                }
+                stack.push((right, child_depth));
+                stack.push((left, child_depth));
+            } else {
+                lengths[usize::from(node.symbol.expect("leaf has symbol"))] = depth as u8;
+            }
+        }
+        if fits {
+            return lengths;
+        }
+        count_limit *= 2;
     }
-    Some(lengths)
 }
 
+fn take_smallest_node(
+    nodes: &[HuffmanNode],
+    leaf_count: usize,
+    next_leaf: &mut usize,
+    next_parent: &mut usize,
+) -> usize {
+    if *next_leaf < leaf_count
+        && (*next_parent >= nodes.len()
+            || nodes[*next_leaf].total_count <= nodes[*next_parent].total_count)
+    {
+        let result = *next_leaf;
+        *next_leaf += 1;
+        result
+    } else {
+        let result = *next_parent;
+        *next_parent += 1;
+        result
+    }
+}
+
+#[cfg(test)]
 fn balanced_code_lengths(frequencies: &[usize]) -> Vec<u8> {
     let mut symbols: Vec<u16> = frequencies
         .iter()
@@ -487,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn deep_huffman_tree_falls_back_to_valid_length_limit() {
+    fn deep_huffman_tree_is_length_limited_without_balancing() {
         let mut frequencies = vec![1_usize, 1];
         while frequencies.len() < 32 {
             let next = frequencies[frequencies.len() - 1] + frequencies[frequencies.len() - 2];
@@ -495,7 +542,11 @@ mod tests {
         }
 
         let code = PrefixEncoding::from_frequencies(&frequencies).unwrap();
-        assert_eq!(code.lengths, balanced_code_lengths(&frequencies));
+        assert!(code.lengths.iter().all(|&length| usize::from(length) <= MAX_CODE_BITS));
+        assert!(
+            code.data_bits(&frequencies)
+                <= weighted_cost(&frequencies, &balanced_code_lengths(&frequencies))
+        );
         assert_complete_tree(&code.lengths);
     }
 
