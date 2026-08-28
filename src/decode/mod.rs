@@ -17,6 +17,8 @@ mod dictionary;
 mod differential_tests;
 mod distance;
 mod history;
+#[cfg(test)]
+mod malformed_tests;
 mod metablock_header;
 mod prefix_code;
 mod prefix_code_decoder;
