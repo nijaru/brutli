@@ -262,11 +262,14 @@ mod tests {
             .collect::<Vec<_>>();
         let mut history = History::new(10);
         history.push_slice(&bytes);
+        let mut model = bytes;
 
         for distance in [1, 17, 511, 1008] {
             let mut output = [0; 1];
             history.copy_into(distance, 1, &mut output).unwrap();
-            assert_eq!(output[0], bytes[bytes.len() - distance]);
+            let expected = model[model.len() - distance];
+            assert_eq!(output[0], expected, "distance {distance}");
+            model.push(expected);
         }
     }
 
