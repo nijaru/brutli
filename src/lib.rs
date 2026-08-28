@@ -8,3 +8,10 @@
 #![warn(missing_docs)]
 
 mod decode;
+
+/// Drives the internal decoder with bounded resources for coverage-guided fuzzing.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_decode(input: &[u8]) {
+    decode::fuzz_decode(input);
+}
