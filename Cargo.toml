@@ -26,6 +26,10 @@ divan = "0.1.21"
 name = "decode"
 harness = false
 
+[[bench]]
+name = "encode"
+harness = false
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
