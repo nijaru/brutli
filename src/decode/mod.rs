@@ -28,3 +28,47 @@ mod simple_prefix_code;
 mod stream_header;
 mod tree_group;
 mod var_len_uint8;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode(input: &[u8]) {
+    use decoder::{Decoder, ProcessStatus};
+
+    const MAX_OUTPUT: usize = 1 << 20;
+    const MAX_STEPS: usize = 4096;
+
+    let mut decoder = Decoder::default();
+    let mut input_offset = 0;
+    let mut total_output = 0;
+
+    for _ in 0..MAX_STEPS {
+        let mut output = [0_u8; 4096];
+        let result = match decoder.process(&input[input_offset..], &mut output) {
+            Ok(result) => result,
+            Err(_) => return,
+        };
+
+        input_offset += result.consumed;
+        total_output += result.produced;
+        assert!(input_offset <= input.len());
+
+        if total_output >= MAX_OUTPUT {
+            return;
+        }
+
+        match result.status {
+            ProcessStatus::Done => return,
+            ProcessStatus::NeedInput => {
+                assert_eq!(input_offset, input.len());
+                return;
+            }
+            ProcessStatus::NeedOutput => {
+                assert!(
+                    result.consumed != 0 || result.produced != 0,
+                    "decoder stalled while requesting output"
+                );
+            }
+        }
+    }
+
+    panic!("decoder exceeded bounded fuzz work");
+}
