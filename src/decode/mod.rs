@@ -11,6 +11,7 @@ mod context;
 mod context_map;
 mod decoder;
 mod distance;
+mod history;
 mod metablock_header;
 mod prefix_code;
 mod prefix_code_decoder;
