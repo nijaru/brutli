@@ -122,18 +122,8 @@ fn huffman_code_lengths(frequencies: &[usize]) -> Vec<u8> {
         let mut next_leaf = 0_usize;
         let mut next_parent = leaf_count;
         for _ in 1..leaf_count {
-            let left = take_smallest_node(
-                &nodes,
-                leaf_count,
-                &mut next_leaf,
-                &mut next_parent,
-            );
-            let right = take_smallest_node(
-                &nodes,
-                leaf_count,
-                &mut next_leaf,
-                &mut next_parent,
-            );
+            let left = take_smallest_node(&nodes, leaf_count, &mut next_leaf, &mut next_parent);
+            let right = take_smallest_node(&nodes, leaf_count, &mut next_leaf, &mut next_parent);
             nodes.push(HuffmanNode {
                 total_count: nodes[left].total_count + nodes[right].total_count,
                 children: Some((left, right)),
@@ -542,7 +532,11 @@ mod tests {
         }
 
         let code = PrefixEncoding::from_frequencies(&frequencies).unwrap();
-        assert!(code.lengths.iter().all(|&length| usize::from(length) <= MAX_CODE_BITS));
+        assert!(
+            code.lengths
+                .iter()
+                .all(|&length| usize::from(length) <= MAX_CODE_BITS)
+        );
         assert!(
             code.data_bits(&frequencies)
                 <= weighted_cost(&frequencies, &balanced_code_lengths(&frequencies))
