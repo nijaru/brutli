@@ -1,3 +1,5 @@
+use std::{cmp::Reverse, collections::BinaryHeap};
+
 use super::bit_writer::BitWriter;
 
 const MAX_CODE_BITS: usize = 15;
@@ -42,27 +44,8 @@ impl PrefixEncoding {
             });
         }
 
-        symbols.sort_unstable_by(|&left, &right| {
-            frequencies[usize::from(right)]
-                .cmp(&frequencies[usize::from(left)])
-                .then_with(|| left.cmp(&right))
-        });
-
-        let count = symbols.len();
-        let short_bits = (usize::BITS - 1 - count.leading_zeros()) as u8;
-        let long_bits = short_bits + 1;
-        debug_assert!(usize::from(long_bits) <= MAX_CODE_BITS);
-        let short_count = (1_usize << long_bits) - count;
-
-        let mut lengths = vec![0_u8; frequencies.len()];
-        for (index, &symbol) in symbols.iter().enumerate() {
-            lengths[usize::from(symbol)] = if index < short_count {
-                short_bits
-            } else {
-                long_bits
-            };
-        }
-
+        let lengths = huffman_code_lengths(frequencies)
+            .unwrap_or_else(|| balanced_code_lengths(frequencies));
         let codes = canonical_codes(&lengths);
         symbols.sort_unstable();
         Some(Self {
@@ -100,6 +83,92 @@ impl PrefixEncoding {
         let code = self.codes[usize::from(symbol)].expect("symbol exists in prefix code");
         writer.write_prefix(code.code, code.bits);
     }
+}
+
+fn huffman_code_lengths(frequencies: &[usize]) -> Option<Vec<u8>> {
+    let active_count = frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count();
+    debug_assert!(active_count > 4);
+
+    let mut parents = Vec::with_capacity(active_count * 2 - 1);
+    let mut leaves = Vec::with_capacity(active_count);
+    let mut heap = BinaryHeap::with_capacity(active_count);
+
+    for (symbol, &frequency) in frequencies.iter().enumerate() {
+        if frequency == 0 {
+            continue;
+        }
+
+        let symbol = u16::try_from(symbol).expect("alphabet fits in u16");
+        let node = parents.len();
+        parents.push(None);
+        leaves.push((symbol, node));
+        heap.push(Reverse((frequency as u128, symbol, node)));
+    }
+
+    while heap.len() > 1 {
+        let Reverse((left_weight, left_symbol, left_node)) =
+            heap.pop().expect("Huffman heap contains left child");
+        let Reverse((right_weight, right_symbol, right_node)) =
+            heap.pop().expect("Huffman heap contains right child");
+        let parent = parents.len();
+        parents[left_node] = Some(parent);
+        parents[right_node] = Some(parent);
+        parents.push(None);
+        heap.push(Reverse((
+            left_weight + right_weight,
+            left_symbol.min(right_symbol),
+            parent,
+        )));
+    }
+
+    let mut lengths = vec![0_u8; frequencies.len()];
+    for (symbol, mut node) in leaves {
+        let mut depth = 0_usize;
+        while let Some(parent) = parents[node] {
+            depth += 1;
+            if depth > MAX_CODE_BITS {
+                return None;
+            }
+            node = parent;
+        }
+        lengths[usize::from(symbol)] = depth as u8;
+    }
+    Some(lengths)
+}
+
+fn balanced_code_lengths(frequencies: &[usize]) -> Vec<u8> {
+    let mut symbols: Vec<u16> = frequencies
+        .iter()
+        .enumerate()
+        .filter(|&(_, &frequency)| frequency != 0)
+        .map(|(symbol, _)| u16::try_from(symbol).expect("alphabet fits in u16"))
+        .collect();
+    debug_assert!(symbols.len() > 4);
+
+    symbols.sort_unstable_by(|&left, &right| {
+        frequencies[usize::from(right)]
+            .cmp(&frequencies[usize::from(left)])
+            .then_with(|| left.cmp(&right))
+    });
+
+    let count = symbols.len();
+    let short_bits = (usize::BITS - 1 - count.leading_zeros()) as u8;
+    let long_bits = short_bits + 1;
+    debug_assert!(usize::from(long_bits) <= MAX_CODE_BITS);
+    let short_count = (1_usize << long_bits) - count;
+
+    let mut lengths = vec![0_u8; frequencies.len()];
+    for (index, symbol) in symbols.into_iter().enumerate() {
+        lengths[usize::from(symbol)] = if index < short_count {
+            short_bits
+        } else {
+            long_bits
+        };
+    }
+    lengths
 }
 
 pub(super) fn write_var_len_u8(writer: &mut BitWriter, value: u8) {
@@ -347,8 +416,8 @@ fn write_code_length_value(writer: &mut BitWriter, value: u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PrefixEncoding, tokenize_code_lengths, write_simple_prefix_code, write_simple_symbol,
-        write_var_len_u8,
+        MAX_CODE_BITS, PrefixEncoding, balanced_code_lengths, tokenize_code_lengths,
+        write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
     };
     use crate::encode::bit_writer::BitWriter;
 
@@ -376,19 +445,58 @@ mod tests {
     }
 
     #[test]
-    fn balanced_code_prefers_frequent_symbols() {
-        let mut frequencies = vec![0; 16];
-        for (symbol, frequency) in [10, 9, 8, 7, 6].into_iter().enumerate() {
-            frequencies[symbol] = frequency;
-        }
+    fn huffman_code_prefers_frequent_symbols() {
+        let frequencies = [100, 10, 10, 10, 10];
         let code = PrefixEncoding::from_frequencies(&frequencies).unwrap();
 
-        assert_eq!(code.lengths[0], 2);
-        assert_eq!(code.lengths[1], 2);
-        assert_eq!(code.lengths[2], 2);
-        assert_eq!(code.lengths[3], 3);
-        assert_eq!(code.lengths[4], 3);
-        assert_eq!(code.data_bits(&frequencies), 93);
+        assert_eq!(code.lengths[0], 1);
+        assert!(code.lengths[1..].iter().all(|&length| length == 3));
+        assert_eq!(code.data_bits(&frequencies), 220);
+        assert_complete_tree(&code.lengths);
+    }
+
+    #[test]
+    fn huffman_cost_is_optimal_for_small_histograms() {
+        for frequencies in [
+            vec![1, 1, 1, 1, 1],
+            vec![100, 10, 10, 10, 10],
+            vec![9, 7, 5, 3, 1],
+            vec![20, 11, 10, 9, 8, 7],
+        ] {
+            let code = PrefixEncoding::from_frequencies(&frequencies).unwrap();
+            assert_eq!(
+                code.data_bits(&frequencies),
+                exhaustive_best_cost(&frequencies)
+            );
+            assert_complete_tree(&code.lengths);
+        }
+    }
+
+    #[test]
+    fn huffman_cost_never_exceeds_balanced_baseline() {
+        for frequencies in [
+            vec![100, 10, 10, 10, 10],
+            vec![30, 20, 10, 5, 3, 2, 1],
+            vec![1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ] {
+            let code = PrefixEncoding::from_frequencies(&frequencies).unwrap();
+            let balanced = balanced_code_lengths(&frequencies);
+            let balanced_cost = weighted_cost(&frequencies, &balanced);
+            assert!(code.data_bits(&frequencies) <= balanced_cost);
+        }
+    }
+
+    #[test]
+    fn deep_huffman_tree_falls_back_to_valid_length_limit() {
+        let mut frequencies = vec![1_usize, 1];
+        while frequencies.len() < 32 {
+            let next = frequencies[frequencies.len() - 1] + frequencies[frequencies.len() - 2];
+            frequencies.push(next);
+        }
+
+        let code = PrefixEncoding::from_frequencies(&frequencies).unwrap();
+        assert_eq!(code.lengths, balanced_code_lengths(&frequencies));
+        assert_complete_tree(&code.lengths);
     }
 
     #[test]
@@ -399,5 +507,84 @@ mod tests {
 
         assert_eq!(symbols, [2, 17, 0, 0, 0, 2]);
         assert_eq!(tokens[1].extra, 7);
+    }
+
+    fn assert_complete_tree(lengths: &[u8]) {
+        let used_lengths: Vec<u8> = lengths
+            .iter()
+            .copied()
+            .filter(|&length| length != 0)
+            .collect();
+        assert!(
+            used_lengths
+                .iter()
+                .all(|&length| usize::from(length) <= MAX_CODE_BITS)
+        );
+        let kraft_units: usize = used_lengths
+            .iter()
+            .map(|&length| 1_usize << (MAX_CODE_BITS - usize::from(length)))
+            .sum();
+        assert_eq!(kraft_units, 1_usize << MAX_CODE_BITS);
+    }
+
+    fn weighted_cost(frequencies: &[usize], lengths: &[u8]) -> usize {
+        frequencies
+            .iter()
+            .zip(lengths)
+            .map(|(&frequency, &length)| frequency * usize::from(length))
+            .sum()
+    }
+
+    fn exhaustive_best_cost(frequencies: &[usize]) -> usize {
+        assert!(frequencies.len() > 1);
+        let max_length = frequencies.len() - 1;
+        let target_space = 1_usize << max_length;
+        let mut best = usize::MAX;
+
+        fn search(
+            frequencies: &[usize],
+            max_length: usize,
+            target_space: usize,
+            index: usize,
+            used_space: usize,
+            cost: usize,
+            best: &mut usize,
+        ) {
+            if index == frequencies.len() {
+                if used_space == target_space {
+                    *best = (*best).min(cost);
+                }
+                return;
+            }
+
+            for length in 1..=max_length {
+                let space = 1_usize << (max_length - length);
+                let next_space = used_space + space;
+                if next_space > target_space {
+                    continue;
+                }
+                search(
+                    frequencies,
+                    max_length,
+                    target_space,
+                    index + 1,
+                    next_space,
+                    cost + frequencies[index] * length,
+                    best,
+                );
+            }
+        }
+
+        search(
+            frequencies,
+            max_length,
+            target_space,
+            0,
+            0,
+            0,
+            &mut best,
+        );
+        assert_ne!(best, usize::MAX);
+        best
     }
 }
