@@ -186,12 +186,18 @@ mod tests {
         assert_eq!(reader.buffered_bits(), 5);
 
         let following = [0b1100_0011];
+        let mut following_cursor = 0;
         assert_eq!(
-            reader.peek_bits_from_input(&following, 0, 8),
-            Some(0b0110_1000)
+            reader.peek_bits_from_input(&following, following_cursor, 8),
+            Some(0b0111_0100)
         );
+        assert_eq!(following_cursor, 0);
         assert_eq!(reader.buffered_bits(), 5);
-        assert_eq!(reader.read_bits(&following, &mut 0, 5), Some(0b10100));
+        assert_eq!(
+            reader.read_bits(&following, &mut following_cursor, 5),
+            Some(0b10100)
+        );
+        assert_eq!(following_cursor, 0);
     }
 
     #[test]
