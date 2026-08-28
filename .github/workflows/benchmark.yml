@@ -5,6 +5,11 @@ on:
   push:
     paths:
       - .github/workflows/benchmark.yml
+      - Cargo.toml
+      - benches/decode.rs
+      - src/decode/bit_reader.rs
+      - src/decode/prefix_code.rs
+      - src/decode/history.rs
 
 permissions:
   contents: read
