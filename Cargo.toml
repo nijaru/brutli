@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "An idiomatic, high-performance Brotli implementation in Rust"
+description = "An idiomatic Brotli implementation"
 repository = "https://github.com/nijaru/brutli"
 readme = "README.md"
 keywords = ["brotli", "compression", "decompression", "codec"]
@@ -18,6 +18,11 @@ fuzzing = []
 
 [dev-dependencies]
 brotli = "8.0.4"
+divan = "0.1.21"
+
+[[bench]]
+name = "decode"
+harness = false
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
