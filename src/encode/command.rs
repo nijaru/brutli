@@ -77,6 +77,7 @@ impl ExplicitCommand {
         self.symbol >= 128
     }
 
+    #[cfg(test)]
     pub(super) const fn extra_bit_count(self) -> u8 {
         self.insert.extra_bits + self.copy.extra_bits
     }
