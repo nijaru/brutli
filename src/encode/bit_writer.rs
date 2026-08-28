@@ -20,6 +20,12 @@ impl BitWriter {
         }
     }
 
+    pub(super) fn write_prefix(&mut self, code: u16, count: u8) {
+        for shift in (0..count).rev() {
+            self.write_bits(u64::from((code >> shift) & 1), 1);
+        }
+    }
+
     pub(super) fn align_to_byte(&mut self) {
         if self.used != 0 {
             self.bytes.push(self.current);
@@ -51,6 +57,15 @@ mod tests {
         writer.write_bits(0b110, 3);
 
         assert_eq!(writer.finish(), vec![0b0001_0110, 0b0000_0011]);
+    }
+
+    #[test]
+    fn writes_prefix_bits_most_significant_first() {
+        let mut writer = BitWriter::default();
+        writer.write_prefix(0b110, 3);
+        writer.write_prefix(0b01, 2);
+
+        assert_eq!(writer.finish(), vec![0b0000_1011]);
     }
 
     #[test]
