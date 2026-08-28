@@ -29,6 +29,8 @@ mod stream_header;
 mod tree_group;
 mod var_len_uint8;
 
+const RFC7932_MAX_WINDOW_BITS: u8 = 24;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoreStatus {
     NeedInput,
@@ -49,19 +51,41 @@ pub(crate) enum CoreError {
     InvalidMetaBlock,
     InvalidCompressedData,
     NonZeroPadding,
+    WindowLimitExceeded {
+        window_bits: u8,
+        max_window_bits: u8,
+    },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct CoreDecoder {
     inner: decoder::Decoder,
+    max_window_bits: u8,
+    window_checked: bool,
+}
+
+impl Default for CoreDecoder {
+    fn default() -> Self {
+        Self::with_max_window_bits(RFC7932_MAX_WINDOW_BITS)
+    }
 }
 
 impl CoreDecoder {
+    pub(crate) fn with_max_window_bits(max_window_bits: u8) -> Self {
+        Self {
+            inner: decoder::Decoder::default(),
+            max_window_bits,
+            window_checked: false,
+        }
+    }
+
     pub(crate) fn process(
         &mut self,
         input: &[u8],
         output: &mut [u8],
     ) -> Result<CoreProgress, CoreError> {
+        self.check_window_limit(input)?;
+
         let result = self
             .inner
             .process(input, output)
@@ -83,6 +107,31 @@ impl CoreDecoder {
             produced: result.produced,
             status,
         })
+    }
+
+    fn check_window_limit(&mut self, input: &[u8]) -> Result<(), CoreError> {
+        if self.window_checked || input.is_empty() {
+            return Ok(());
+        }
+
+        let mut header_decoder = stream_header::StreamHeaderDecoder::default();
+        let mut reader = bit_reader::BitReader::default();
+        let mut cursor = 0;
+        let header = header_decoder
+            .decode(&mut reader, input, &mut cursor)
+            .map_err(|_| CoreError::InvalidStreamHeader)?
+            .expect("a Brotli stream header fits within one input byte");
+        let window_bits = header.window_bits();
+        self.window_checked = true;
+
+        if window_bits > self.max_window_bits {
+            return Err(CoreError::WindowLimitExceeded {
+                window_bits,
+                max_window_bits: self.max_window_bits,
+            });
+        }
+
+        Ok(())
     }
 }
 
