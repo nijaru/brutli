@@ -1,6 +1,7 @@
 const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
 const MIN_MATCH: usize = 4;
+const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
 const EMPTY: u32 = u32::MAX;
 
@@ -92,6 +93,24 @@ fn hash4(input: &[u8], position: usize) -> usize {
 fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
     let mut length = MIN_MATCH;
     let limit = input.len() - current;
+
+    while length + MATCH_WORD_BYTES <= limit {
+        let previous_word = u64::from_ne_bytes(
+            input[previous + length..previous + length + MATCH_WORD_BYTES]
+                .try_into()
+                .expect("match word has eight bytes"),
+        );
+        let current_word = u64::from_ne_bytes(
+            input[current + length..current + length + MATCH_WORD_BYTES]
+                .try_into()
+                .expect("match word has eight bytes"),
+        );
+        if previous_word != current_word {
+            break;
+        }
+        length += MATCH_WORD_BYTES;
+    }
+
     while length < limit && input[previous + length] == input[current + length] {
         length += 1;
     }
@@ -100,7 +119,7 @@ fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::greedy_parse;
+    use super::{extend_match, greedy_parse};
 
     #[test]
     fn finds_repeated_phrase() {
@@ -130,5 +149,11 @@ mod tests {
         let parse = greedy_parse(b"abcdefghijklmno");
         assert!(parse.commands.is_empty());
         assert_eq!(parse.tail_start, 0);
+    }
+
+    #[test]
+    fn word_extension_stops_at_first_mismatch() {
+        let source = b"abcdefghijklmnopabcdefghijklXnop";
+        assert_eq!(extend_match(source, 0, 16), 5);
     }
 }
