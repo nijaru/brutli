@@ -1,16 +1,34 @@
 use super::{DIRECT_DISTANCE_CODES, command::ExplicitCommand, distance::DistanceCode};
 
-const TABLE_BITS: usize = 16;
+const TABLE_BITS: usize = 14;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
-const BUCKET_SIZE: usize = 2;
+const BUCKET_SIZE: usize = 8;
 const MIN_MATCH: usize = 4;
 const MAX_LAZY_MATCH: usize = 16;
 const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
 const LITERAL_BIT_ESTIMATE: isize = 8;
-const EMPTY: u32 = u32::MAX;
 
-type MatchBucket = [u32; BUCKET_SIZE];
+#[derive(Debug, Clone, Copy)]
+struct MatchBucket {
+    positions: [u32; BUCKET_SIZE],
+    next: u8,
+    len: u8,
+}
+
+impl MatchBucket {
+    const EMPTY: Self = Self {
+        positions: [0; BUCKET_SIZE],
+        next: 0,
+        len: 0,
+    };
+
+    fn insert(&mut self, position: u32) {
+        self.positions[usize::from(self.next)] = position;
+        self.next = (self.next + 1) & (BUCKET_SIZE as u8 - 1);
+        self.len = self.len.saturating_add(1).min(BUCKET_SIZE as u8);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MatchCommand {
@@ -39,8 +57,7 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         };
     }
 
-    let mut table = vec![[EMPTY; BUCKET_SIZE]; TABLE_SIZE];
-    let mut cursors = vec![0_u8; TABLE_SIZE];
+    let mut table = vec![MatchBucket::EMPTY; TABLE_SIZE];
     let mut commands = Vec::new();
     let mut position = 0_usize;
     let mut literal_start = 0_usize;
@@ -48,10 +65,9 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
     while position + MIN_MATCH <= input.len() {
         let key = hash4(input, position);
         let candidates = table[key];
-        insert_position(&mut table[key], &mut cursors[key], position as u32);
+        table[key].insert(position as u32);
 
-        let Some((previous_position, match_length)) = best_match(input, position, &candidates)
-        else {
+        let Some((previous_position, match_length)) = best_match(input, position, candidates) else {
             position += 1;
             continue;
         };
@@ -81,7 +97,7 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         for skipped in position + 1..end {
             if skipped + MIN_MATCH <= input.len() {
                 let key = hash4(input, skipped);
-                insert_position(&mut table[key], &mut cursors[key], skipped as u32);
+                table[key].insert(skipped as u32);
             }
         }
         position = end;
@@ -108,8 +124,7 @@ fn should_defer_match(
     }
 
     let next_candidates = table[hash4(input, next_position)];
-    let Some((next_previous, next_length)) = best_match(input, next_position, &next_candidates)
-    else {
+    let Some((next_previous, next_length)) = best_match(input, next_position, next_candidates) else {
         return false;
     };
 
@@ -133,15 +148,14 @@ fn estimated_match_gain(insert_length: usize, copy_length: usize, distance: usiz
     copied_literal_bits - extra_bits
 }
 
-fn best_match(input: &[u8], position: usize, candidates: &MatchBucket) -> Option<(usize, usize)> {
+fn best_match(input: &[u8], position: usize, candidates: MatchBucket) -> Option<(usize, usize)> {
     let mut best_position = 0_usize;
     let mut best_length = 0_usize;
 
-    for &previous in candidates {
-        if previous == EMPTY {
-            continue;
-        }
-        let previous_position = previous as usize;
+    for offset in 0..usize::from(candidates.len) {
+        let index = (usize::from(candidates.next) + BUCKET_SIZE - 1 - offset)
+            & (BUCKET_SIZE - 1);
+        let previous_position = candidates.positions[index] as usize;
         if position - previous_position > MAX_BACKWARD_DISTANCE
             || input[previous_position..previous_position + MIN_MATCH]
                 != input[position..position + MIN_MATCH]
@@ -159,11 +173,6 @@ fn best_match(input: &[u8], position: usize, candidates: &MatchBucket) -> Option
     }
 
     (best_length >= MIN_MATCH).then_some((best_position, best_length))
-}
-
-fn insert_position(bucket: &mut MatchBucket, cursor: &mut u8, position: u32) {
-    bucket[usize::from(*cursor)] = position;
-    *cursor = (*cursor + 1) & (BUCKET_SIZE as u8 - 1);
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {
@@ -204,9 +213,7 @@ fn extend_match(input: &[u8], previous: usize, current: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EMPTY, best_match, estimated_match_gain, extend_match, greedy_parse, insert_position,
-    };
+    use super::{BUCKET_SIZE, MatchBucket, best_match, estimated_match_gain, extend_match, greedy_parse};
 
     #[test]
     fn finds_repeated_phrase() {
@@ -246,26 +253,28 @@ mod tests {
     }
 
     #[test]
-    fn ring_bucket_keeps_two_most_recent_positions() {
-        let mut bucket = [EMPTY; 2];
-        let mut cursor = 0;
-        for position in [2, 4, 7, 9, 10, 12] {
-            insert_position(&mut bucket, &mut cursor, position);
+    fn ring_bucket_keeps_eight_most_recent_positions() {
+        let mut bucket = MatchBucket::EMPTY;
+        for position in 0..12 {
+            bucket.insert(position);
         }
-        bucket.sort_unstable();
-        assert_eq!(bucket, [10, 12]);
-        assert_eq!(cursor, 0);
+        let mut positions = bucket.positions;
+        positions.sort_unstable();
+        assert_eq!(positions, [4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(usize::from(bucket.len), BUCKET_SIZE);
+        assert_eq!(bucket.next, 4);
     }
 
     #[test]
     fn selects_longest_candidate_then_nearest_tie() {
         let source = b"abcdWXYZabcdQRSTabcdWXYZ";
-        let candidates = [0, 8];
-        assert_eq!(best_match(source, 16, &candidates), Some((0, 8)));
+        let mut candidates = MatchBucket::EMPTY;
+        candidates.insert(0);
+        candidates.insert(8);
+        assert_eq!(best_match(source, 16, candidates), Some((0, 8)));
 
         let tied = b"abcdxxxxabcdyyyyabcdzzzz";
-        let candidates = [0, 8];
-        assert_eq!(best_match(tied, 16, &candidates), Some((8, 4)));
+        assert_eq!(best_match(tied, 16, candidates), Some((8, 4)));
     }
 
     #[test]
