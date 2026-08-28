@@ -62,6 +62,7 @@ impl RecentDistances {
         self.values[0] = distance;
     }
 
+    #[cfg(test)]
     pub(super) fn encode(&mut self, distance: usize, direct_codes: u16) -> DistanceCode {
         let raw_code = self.compute_code(distance, usize::MAX);
         if raw_code != 0 {
@@ -70,6 +71,7 @@ impl RecentDistances {
         DistanceCode::for_code(raw_code, direct_codes)
     }
 
+    #[cfg(test)]
     fn resolve_short(&self, symbol: u16) -> Option<usize> {
         let (index, delta) = match symbol {
             0 => (0, 0),
@@ -148,6 +150,7 @@ impl DistanceCode {
         panic!("distance exceeds the RFC 7932 window range");
     }
 
+    #[cfg(test)]
     pub(super) const fn extra_bit_count(self) -> u8 {
         self.extra_bits
     }
