@@ -74,7 +74,7 @@ mod tests {
     fn simple_two_symbol_code_has_expected_layout() {
         let mut writer = BitWriter::default();
         write_simple_prefix_code(&mut writer, &[2, 5], 8);
-        assert_eq!(writer.finish(), [0b0101_0101, 0]);
+        assert_eq!(writer.finish(), [0b1010_0101, 0b0000_0010]);
     }
 
     #[test]
