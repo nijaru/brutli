@@ -1,0 +1,74 @@
+name: Fix Clippy
+
+on:
+  push:
+    paths:
+      - .github/workflows/fix-clippy.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Apply focused cleanup
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=None):
+              p = Path(path)
+              text = p.read_text()
+              actual = text.count(old)
+              if count is not None and actual != count:
+                  raise SystemExit(f"{path}: expected {count} occurrences of {old!r}, found {actual}")
+              if actual == 0:
+                  raise SystemExit(f"{path}: pattern not found: {old!r}")
+              p.write_text(text.replace(old, new))
+
+          for old, new in [
+              ("InvalidCopyLength", "CopyLength"),
+              ("InvalidDistance", "Distance"),
+              ("InvalidTransform", "Transform"),
+              ("InvalidWord", "Word"),
+          ]:
+              replace("src/decode/dictionary.rs", old, new)
+
+          for old, new in [
+              ("NonZeroPadding", "PaddingNotZero"),
+              ("NonZeroReservedBit", "ReservedBitSet"),
+              ("NonMinimalLength", "LengthNotMinimal"),
+          ]:
+              replace("src/decode/metablock_header.rs", old, new)
+
+          replace(
+              "src/decode/prefix_code.rs",
+              """        for length in 1..=MAX_CODE_BITS {\n            first_symbol[length] = symbols.len() as u16;\n            for (symbol, &symbol_length) in lengths.iter().enumerate() {\n                if usize::from(symbol_length) == length {\n                    symbols.push(symbol as u16);\n                }\n            }\n        }""",
+              """        for (length, first) in first_symbol.iter_mut().enumerate().skip(1) {\n            *first = symbols.len() as u16;\n            for (symbol, &symbol_length) in lengths.iter().enumerate() {\n                if usize::from(symbol_length) == length {\n                    symbols.push(symbol as u16);\n                }\n            }\n        }""",
+              count=1,
+          )
+
+          replace(
+              "src/decode/prefix_code_decoder.rs",
+              """#[derive(Debug, Default)]\nenum State {""",
+              """#[derive(Debug, Default)]\n#[expect(\n    clippy::large_enum_variant,\n    reason = \"keeping complex prefix-code construction inline avoids a heap allocation per tree\"\n)]\nenum State {""",
+              count=1,
+          )
+          PY
+          cargo fmt --all
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-features
+      - name: Commit cleanup
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/decode/dictionary.rs src/decode/metablock_header.rs src/decode/prefix_code.rs src/decode/prefix_code_decoder.rs
+          git commit -m "fix: clean decoder clippy warnings"
+          git push
