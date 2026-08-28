@@ -11,6 +11,9 @@ keywords = ["brotli", "compression", "decompression", "codec"]
 categories = ["compression", "encoding"]
 publish = false
 
+[features]
+fuzzing = []
+
 [dependencies]
 
 [dev-dependencies]
