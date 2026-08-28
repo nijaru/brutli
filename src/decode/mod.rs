@@ -17,6 +17,8 @@ mod history;
 mod metablock_header;
 mod prefix_code;
 mod prefix_code_decoder;
+#[cfg(test)]
+mod reference_tests;
 mod simple_prefix_code;
 mod stream_header;
 mod tree_group;
