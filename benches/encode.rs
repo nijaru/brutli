@@ -84,7 +84,8 @@ fn rust_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
     compressed
 }
 
-fn google_brotli_compress(source: &[u8], quality: i32) -> Vec<u8> {
+fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
+    let quality = i32::try_from(quality).expect("Brotli quality fits c_int");
     let capacity = unsafe {
         // SAFETY: The function only computes an upper bound from the supplied size.
         brotli_sys::BrotliEncoderMaxCompressedSize(source.len())
@@ -122,7 +123,7 @@ fn bench_rust_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quali
         .bench(|| rust_brotli_compress(divan::black_box(case.source.as_slice()), quality));
 }
 
-fn bench_google_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quality: i32) {
+fn bench_google_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quality: u32) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| google_brotli_compress(divan::black_box(case.source.as_slice()), quality));
