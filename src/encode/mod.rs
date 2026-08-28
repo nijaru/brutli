@@ -20,23 +20,55 @@ const DIRECT_DISTANCE_CODES: u16 = 4;
 const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_DISTANCE_CODES;
 
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
-    let mut best = compress_stored(input);
-
-    for candidate in [
-        try_simple_compressed(input),
-        try_general_literal_compressed(input),
-        try_periodic_compressed(input),
-        greedy::try_compress(input),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if candidate.len() < best.len() {
-            best = candidate;
-        }
+    if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
+        return compress_stored(input);
     }
 
-    best
+    if let Some(candidate) = try_periodic_compressed(input) {
+        return choose_against_stored(input, candidate);
+    }
+
+    if let Some(candidate) = greedy::try_compress(input) {
+        if candidate.len() <= input.len() {
+            return candidate;
+        }
+
+        let mut best = candidate;
+        if let Some(literal) = try_simple_compressed(input)
+            && literal.len() < best.len()
+        {
+            best = literal;
+        }
+        if let Some(literal) = try_general_literal_compressed(input)
+            && literal.len() < best.len()
+        {
+            best = literal;
+        }
+        return choose_against_stored(input, best);
+    }
+
+    if let Some(candidate) = try_simple_compressed(input) {
+        return choose_against_stored(input, candidate);
+    }
+
+    if let Some(candidate) = try_general_literal_compressed(input) {
+        return choose_against_stored(input, candidate);
+    }
+
+    compress_stored(input)
+}
+
+fn choose_against_stored(input: &[u8], candidate: Vec<u8>) -> Vec<u8> {
+    if candidate.len() <= input.len() {
+        return candidate;
+    }
+
+    let stored = compress_stored(input);
+    if candidate.len() < stored.len() {
+        candidate
+    } else {
+        stored
+    }
 }
 
 fn compress_stored(input: &[u8]) -> Vec<u8> {
@@ -93,6 +125,9 @@ fn try_general_literal_compressed(input: &[u8]) -> Option<Vec<u8>> {
     }
 
     let literal_code = PrefixEncoding::from_frequencies(&frequencies)?;
+    if literal_code.data_bits(&frequencies) >= input.len().saturating_mul(8) {
+        return None;
+    }
     let command = InsertCommand::for_length(input.len());
 
     let mut writer = BitWriter::default();
