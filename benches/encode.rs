@@ -38,7 +38,8 @@ static REPETITIVE: LazyLock<Case> =
 static HTML: LazyLock<Case> = LazyLock::new(|| Case::new(generated_html()));
 static JSON: LazyLock<Case> = LazyLock::new(|| Case::new(generated_json()));
 static JAVASCRIPT: LazyLock<Case> = LazyLock::new(|| Case::new(generated_javascript()));
-static STRUCTURED_BINARY: LazyLock<Case> = LazyLock::new(|| Case::new(generated_structured_binary()));
+static STRUCTURED_BINARY: LazyLock<Case> =
+    LazyLock::new(|| Case::new(generated_structured_binary()));
 
 static BINARY: LazyLock<Case> = LazyLock::new(|| {
     let mut source = Vec::with_capacity(64 * 1024);
@@ -116,7 +117,9 @@ fn generated_javascript() -> Vec<u8> {
         )
         .unwrap();
     }
-    source.push_str("export function total(){ return records.reduce((sum, item) => sum + item.value, 0); }\n");
+    source.push_str(
+        "export function total(){ return records.reduce((sum, item) => sum + item.value, 0); }\n",
+    );
     source.into_bytes()
 }
 
