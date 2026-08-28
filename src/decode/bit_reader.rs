@@ -181,7 +181,10 @@ mod tests {
         let mut reader = BitReader::default();
         let mut cursor = 0;
 
-        assert_eq!(reader.read_bits(&[0b1010_0101], &mut cursor, 3), Some(0b101));
+        assert_eq!(
+            reader.read_bits(&[0b1010_0101], &mut cursor, 3),
+            Some(0b101)
+        );
         assert_eq!(cursor, 1);
         assert_eq!(reader.buffered_bits(), 5);
 
