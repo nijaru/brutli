@@ -40,12 +40,7 @@ impl BitReader {
     /// Returning `false` does not discard already-buffered bits. Bytes that
     /// were available in `input` are retained in the staging buffer so a
     /// smaller read or a later call can still consume them.
-    pub(super) fn ensure_bits(
-        &mut self,
-        input: &[u8],
-        cursor: &mut usize,
-        count: u32,
-    ) -> bool {
+    pub(super) fn ensure_bits(&mut self, input: &[u8], cursor: &mut usize, count: u32) -> bool {
         assert!(count <= Self::MAX_READ_BITS);
 
         while self.buffered < count {
