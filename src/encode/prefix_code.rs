@@ -81,8 +81,7 @@ impl PrefixEncoding {
                 if frequency == 0 {
                     0
                 } else {
-                    frequency
-                        * usize::from(code.expect("used symbol exists in prefix code").bits)
+                    frequency * usize::from(code.expect("used symbol exists in prefix code").bits)
                 }
             })
             .sum()
