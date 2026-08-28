@@ -133,7 +133,8 @@ fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) ->
                 ..encoded.parsed.insert_start + encoded.parsed.insert_length],
         );
         if let Some(distance) = encoded.distance {
-            plan.distance_code.write_symbol(&mut writer, distance.symbol);
+            plan.distance_code
+                .write_symbol(&mut writer, distance.symbol);
             distance.write_extra(&mut writer);
         }
     }
@@ -195,7 +196,8 @@ fn encode_literal_split(plan: &EncodingPlan<'_>, literals: &[u8]) -> Option<Vec<
                 ..encoded.parsed.insert_start + encoded.parsed.insert_length],
         );
         if let Some(distance) = encoded.distance {
-            plan.distance_code.write_symbol(&mut writer, distance.symbol);
+            plan.distance_code
+                .write_symbol(&mut writer, distance.symbol);
             distance.write_extra(&mut writer);
         }
     }
@@ -203,12 +205,7 @@ fn encode_literal_split(plan: &EncodingPlan<'_>, literals: &[u8]) -> Option<Vec<
     if let Some(command) = plan.tail_command {
         plan.command_code.write_symbol(&mut writer, command.symbol);
         command.write_extra(&mut writer);
-        write_split_literal_slice(
-            &mut writer,
-            &mut literal_cursor,
-            &literal_codes,
-            plan.tail,
-        );
+        write_split_literal_slice(&mut writer, &mut literal_cursor, &literal_codes, plan.tail);
     }
 
     Some(writer.finish())
