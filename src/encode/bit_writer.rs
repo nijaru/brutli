@@ -65,7 +65,7 @@ mod tests {
         writer.write_prefix(0b110, 3);
         writer.write_prefix(0b01, 2);
 
-        assert_eq!(writer.finish(), vec![0b0000_1011]);
+        assert_eq!(writer.finish(), vec![0b0001_0011]);
     }
 
     #[test]
