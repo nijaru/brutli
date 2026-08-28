@@ -106,13 +106,13 @@ cargo clippy --all-targets --all-features
 
 ## Benchmarks
 
-The decoder benchmark compares Brutli with `rust-brotli` on text, highly repetitive data, and incompressible binary data:
+The decoder benchmark compares Brutli with the official Google Brotli C decoder and `rust-brotli` on text, highly repetitive data, and incompressible binary data:
 
 ```text
 cargo bench --bench decode
 ```
 
-The harness validates every fixture before timing and reports decoded-byte throughput for multiple API shapes: Brutli's direct incremental core, one-shot helper, and `Read` adapter, plus `rust-brotli`'s direct `brotli_decode`, `Decompressor`, and `BrotliDecompress` paths.
+The harness validates every fixture before timing and reports decoded-byte throughput for multiple API shapes: Brutli's direct incremental core, one-shot helper, and `Read` adapter; the official Google Brotli `BrotliDecoderDecompress` path; and `rust-brotli`'s direct `brotli_decode`, `Decompressor`, and `BrotliDecompress` paths.
 
 GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. The next performance phase is controlled local profiling and benchmarking against both `rust-brotli` and the official Google Brotli decoder, including CPU counters and allocation/memory measurements.
 

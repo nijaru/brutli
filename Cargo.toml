@@ -19,6 +19,7 @@ fuzzing = []
 [dev-dependencies]
 brotli = "8.0.4"
 brotli-decompressor = "5.0.3"
+brotli-sys = "0.3.2"
 divan = "0.1.21"
 
 [[bench]]

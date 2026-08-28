@@ -64,6 +64,15 @@ impl Case {
             "rust-brotli direct-slice fixture failed validation"
         );
 
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let decoded_size = google_brotli_decode_into(&compressed, &mut decoded);
+        assert_eq!(decoded_size, source.len());
+        assert_eq!(
+            &decoded[..decoded_size],
+            source,
+            "Google Brotli direct-slice fixture failed validation"
+        );
+
         Self { source, compressed }
     }
 }
@@ -191,6 +200,38 @@ fn bench_rust_brotli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case
         });
 }
 
+fn google_brotli_decode_into(input: &[u8], output: &mut [u8]) -> usize {
+    let mut decoded_size = output.len();
+    let result = unsafe {
+        // SAFETY: The input and output pointers are valid for their respective lengths,
+        // and the decoder writes at most the capacity supplied through `decoded_size`.
+        brotli_sys::BrotliDecoderDecompress(
+            input.len(),
+            input.as_ptr(),
+            &mut decoded_size,
+            output.as_mut_ptr(),
+        )
+    };
+    assert_ne!(
+        result, 0,
+        "Google Brotli decoder rejected benchmark fixture"
+    );
+    decoded_size
+}
+
+fn bench_google_brotli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    let mut output = vec![0_u8; case.source.len() + 1];
+    bencher
+        .counter(BytesCount::new(case.source.len()))
+        .bench_local(move || {
+            let decoded_size = google_brotli_decode_into(
+                divan::black_box(&case.compressed),
+                divan::black_box(&mut output),
+            );
+            divan::black_box(decoded_size)
+        });
+}
+
 fn bench_rust_brotli_stream_copy(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
@@ -230,6 +271,11 @@ macro_rules! decode_benches {
             #[divan::bench]
             fn rust_brotli_reader(bencher: divan::Bencher<'_, '_>) {
                 bench_rust_brotli_reader(bencher, &$case);
+            }
+
+            #[divan::bench]
+            fn google_brotli_direct(bencher: divan::Bencher<'_, '_>) {
+                bench_google_brotli_direct(bencher, &$case);
             }
 
             #[divan::bench]
