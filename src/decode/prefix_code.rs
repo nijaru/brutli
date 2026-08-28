@@ -146,8 +146,7 @@ impl CanonicalCode {
         cursor: &mut usize,
     ) -> Option<u16> {
         if state.length == 0
-            && let Some(prefix) =
-                reader.peek_bits_from_input(input, *cursor, u32::from(FAST_BITS))
+            && let Some(prefix) = reader.peek_bits_from_input(input, *cursor, u32::from(FAST_BITS))
         {
             let entry = self.fast[prefix as usize];
             if entry.bits != 0 {
