@@ -2,6 +2,7 @@
 
 mod bit_reader;
 mod block_partition;
+mod command;
 mod complex_prefix_code;
 mod compressed_header;
 mod compressed_trees;
