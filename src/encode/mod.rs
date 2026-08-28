@@ -79,7 +79,12 @@ fn try_general_literal_compressed(input: &[u8]) -> Option<Vec<u8>> {
     for &byte in input {
         frequencies[usize::from(byte)] += 1;
     }
-    if frequencies.iter().filter(|&&frequency| frequency != 0).count() <= 4 {
+    if frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count()
+        <= 4
+    {
         return None;
     }
 
