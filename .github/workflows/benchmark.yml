@@ -7,9 +7,7 @@ on:
       - .github/workflows/benchmark.yml
       - Cargo.toml
       - benches/decode.rs
-      - src/decode/bit_reader.rs
-      - src/decode/prefix_code.rs
-      - src/decode/history.rs
+      - "src/decode/**"
 
 permissions:
   contents: read
