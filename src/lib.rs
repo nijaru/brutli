@@ -1,8 +1,8 @@
 //! Brutli is an idiomatic, high-performance Brotli implementation in Rust.
 //!
-//! The initial implementation target is an incremental RFC 7932 decoder.
-//! The primary API consumes input slices and fills caller-provided output
-//! slices without taking ownership of either buffer.
+//! The RFC 7932 decoder provides incremental buffer-to-buffer decoding. The
+//! encoder currently provides a one-shot standards-compliant baseline that
+//! emits uncompressed meta-blocks while compressed encoding is developed.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -10,6 +10,7 @@
 use std::fmt;
 
 mod decode;
+mod encode;
 mod reader;
 
 pub use reader::DecoderReader;
@@ -218,6 +219,15 @@ impl Decoder {
             status,
         })
     }
+}
+
+/// Encodes one complete RFC 7932 Brotli stream.
+///
+/// The initial encoder emits uncompressed meta-blocks. The resulting stream
+/// is standards-compliant but is not expected to reduce the input size yet.
+#[must_use]
+pub fn compress(input: &[u8]) -> Vec<u8> {
+    encode::compress(input)
 }
 
 /// Decompresses one complete Brotli stream into a `Vec<u8>`.
