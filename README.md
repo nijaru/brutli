@@ -85,15 +85,16 @@ let compressed = brutli::compress(b"Brotli data");
 Its current baseline includes:
 
 - RFC 7932 stream and meta-block framing.
-- A fast greedy LZ77 parser with a compact 64K last-position hash table.
-- Canonical literal, command, and distance prefix-code generation.
+- A bounded two-candidate-per-hash LZ77 matcher with compact `u32` positions.
+- One-step lazy matching for short copies using an approximate format-bit cost.
+- Frequency-weighted canonical Huffman generation with a valid 15-bit fallback.
 - Simple and complex prefix-tree serialization.
-- General backward-distance encoding plus direct short-distance codes.
+- General backward-distance encoding plus Brotli recent-distance short codes.
 - Specialized short-period encoding for highly repetitive input.
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-The encoder deliberately does not expose quality levels yet. Match-search depth, context modeling, block splitting, recent-distance optimization, and other ratio/quality heuristics should be added only after broader corpus measurements justify them.
+The encoder deliberately does not expose quality levels yet. Literal context modeling, block splitting, static-dictionary references, deeper parsing, and other ratio/quality heuristics should be added only after broader corpus measurements justify them.
 
 ## Goals
 
