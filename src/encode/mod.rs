@@ -17,12 +17,9 @@ const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
     let mut best = compress_stored(input);
 
-    for candidate in [
-        try_simple_compressed(input),
-        try_periodic_compressed(input),
-    ]
-    .into_iter()
-    .flatten()
+    for candidate in [try_simple_compressed(input), try_periodic_compressed(input)]
+        .into_iter()
+        .flatten()
     {
         if candidate.len() < best.len() {
             best = candidate;
