@@ -1,0 +1,19 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/benchmark.yml
+
+permissions:
+  contents: read
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Decoder benchmark
+        run: cargo bench --bench decode -- --sample-count 20 --sample-size 1
