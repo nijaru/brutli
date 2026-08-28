@@ -145,10 +145,15 @@ impl CanonicalCode {
         input: &[u8],
         cursor: &mut usize,
     ) -> Option<u16> {
-        if state.length == 0 && reader.ensure_bits(input, cursor, u32::from(FAST_BITS)) {
-            let entry = self.fast[reader.peek_bits(u32::from(FAST_BITS)) as usize];
+        if state.length == 0
+            && let Some(prefix) =
+                reader.peek_bits_from_input(input, *cursor, u32::from(FAST_BITS))
+        {
+            let entry = self.fast[prefix as usize];
             if entry.bits != 0 {
-                reader.consume_bits(u32::from(entry.bits));
+                reader
+                    .read_bits(input, cursor, u32::from(entry.bits))
+                    .expect("fast prefix peek proved symbol bits are available");
                 return Some(entry.symbol);
             }
         }
@@ -348,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn short_code_decodes_when_fast_refill_cannot_reach_eight_bits() {
+    fn short_code_decodes_when_fast_peek_cannot_reach_eight_bits() {
         let code = PrefixCode::from_code_lengths(&[1, 2, 3, 3]).unwrap();
         let mut reader = BitReader::default();
         let mut state = PrefixSymbolDecoder::default();
