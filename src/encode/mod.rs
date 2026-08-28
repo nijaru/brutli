@@ -1,5 +1,8 @@
 mod bit_writer;
 mod command;
+mod distance;
+mod greedy;
+mod match_finder;
 mod prefix_code;
 
 use bit_writer::BitWriter;
@@ -23,6 +26,7 @@ pub(super) fn compress(input: &[u8]) -> Vec<u8> {
         try_simple_compressed(input),
         try_general_literal_compressed(input),
         try_periodic_compressed(input),
+        greedy::try_compress(input),
     ]
     .into_iter()
     .flatten()
