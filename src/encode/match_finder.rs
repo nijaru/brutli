@@ -2,7 +2,7 @@ const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
 const MIN_MATCH: usize = 4;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
-const EMPTY: u32 = u32::MAX;
+const EMPTY: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MatchCommand {
@@ -34,17 +34,13 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
     while position + MIN_MATCH <= input.len() {
         let key = hash4(input, position);
         let previous = table[key];
-        table[key] = stored_position(position);
+        table[key] = position;
 
-        let match_length = if previous != EMPTY {
-            let previous = previous as usize;
-            if position - previous <= MAX_BACKWARD_DISTANCE
-                && input[previous..previous + MIN_MATCH] == input[position..position + MIN_MATCH]
-            {
-                extend_match(input, previous, position)
-            } else {
-                0
-            }
+        let match_length = if previous != EMPTY
+            && position - previous <= MAX_BACKWARD_DISTANCE
+            && input[previous..previous + MIN_MATCH] == input[position..position + MIN_MATCH]
+        {
+            extend_match(input, previous, position)
         } else {
             0
         };
@@ -54,7 +50,6 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
             continue;
         }
 
-        let previous = previous as usize;
         commands.push(MatchCommand {
             insert_start: literal_start,
             insert_length: position - literal_start,
@@ -65,7 +60,7 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         let end = position + match_length;
         for skipped in position + 1..end {
             if skipped + MIN_MATCH <= input.len() {
-                table[hash4(input, skipped)] = stored_position(skipped);
+                table[hash4(input, skipped)] = skipped;
             }
         }
         position = end;
@@ -76,10 +71,6 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
         commands,
         tail_start: literal_start,
     }
-}
-
-fn stored_position(position: usize) -> u32 {
-    u32::try_from(position).expect("meta-block position fits in u32")
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {
