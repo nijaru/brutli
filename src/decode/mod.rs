@@ -5,6 +5,7 @@ mod block_partition;
 mod block_state;
 mod command;
 mod complex_prefix_code;
+mod compressed_block;
 mod compressed_header;
 mod compressed_trees;
 mod context;
