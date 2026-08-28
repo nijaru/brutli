@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn reports_explicit_extra_bit_count() {
         assert_eq!(ExplicitCommand::for_lengths(5, 7).extra_bit_count(), 0);
-        assert_eq!(ExplicitCommand::for_lengths(147, 79).extra_bit_count(), 12);
+        assert_eq!(ExplicitCommand::for_lengths(147, 79).extra_bit_count(), 11);
     }
 
     #[test]
