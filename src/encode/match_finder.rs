@@ -4,6 +4,7 @@ const TABLE_BITS: usize = 16;
 const TABLE_SIZE: usize = 1 << TABLE_BITS;
 const BUCKET_SIZE: usize = 2;
 const MIN_MATCH: usize = 4;
+const MAX_LAZY_MATCH: usize = 16;
 const MATCH_WORD_BYTES: usize = 8;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
 const LITERAL_BIT_ESTIMATE: isize = 8;
@@ -55,14 +56,16 @@ pub(super) fn greedy_parse(input: &[u8]) -> Parse {
             continue;
         };
 
-        if should_defer_match(
-            input,
-            position,
-            literal_start,
-            previous_position,
-            match_length,
-            &table,
-        ) {
+        if match_length <= MAX_LAZY_MATCH
+            && should_defer_match(
+                input,
+                position,
+                literal_start,
+                previous_position,
+                match_length,
+                &table,
+            )
+        {
             position += 1;
             continue;
         }
