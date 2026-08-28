@@ -623,9 +623,10 @@ mod tests {
     }
 
     #[test]
-    fn greedy_splitter_separates_different_literal_regions() {
-        let mut data = vec![b'a'; 4096];
-        data.resize(8192, b'z');
+    fn greedy_splitter_separates_high_gain_literal_regions() {
+        let mut data = Vec::with_capacity(1024);
+        data.extend((0..512).map(|index| if index & 1 == 0 { b'a' } else { b'b' }));
+        data.extend((0..512).map(|index| if index & 1 == 0 { b'y' } else { b'z' }));
         let result = split_literals(&data);
         assert!(result.split.num_types >= 2);
         assert!(result.split.lengths.iter().sum::<usize>() >= data.len());
