@@ -161,8 +161,7 @@ fn nibbles_for_length(length: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length,
-        simple_literal_alphabet,
+        MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length, simple_literal_alphabet,
     };
     use crate::{DecodeError, Decoder, decompress};
 
@@ -257,7 +256,10 @@ mod tests {
     #[test]
     fn simple_alphabet_rejects_five_symbols() {
         assert_eq!(simple_literal_alphabet(b"abcde"), None);
-        assert_eq!(simple_literal_alphabet(b"dcba"), Some(vec![97, 98, 99, 100]));
+        assert_eq!(
+            simple_literal_alphabet(b"dcba"),
+            Some(vec![97, 98, 99, 100])
+        );
     }
 
     #[test]
