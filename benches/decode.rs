@@ -46,14 +46,17 @@ fn main() {
 fn bench_brutli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
-        .bench(|| brutli::decompress(divan::black_box(&case.compressed), case.source.len()).unwrap());
+        .bench(|| {
+            brutli::decompress(divan::black_box(&case.compressed), case.source.len()).unwrap()
+        });
 }
 
 fn bench_rust_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| {
-            let mut decoder = brotli::Decompressor::new(divan::black_box(case.compressed.as_slice()), 4096);
+            let mut decoder =
+                brotli::Decompressor::new(divan::black_box(case.compressed.as_slice()), 4096);
             let mut output = Vec::with_capacity(case.source.len());
             decoder.read_to_end(&mut output).unwrap();
             output
