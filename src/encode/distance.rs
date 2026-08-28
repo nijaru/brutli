@@ -24,9 +24,7 @@ impl DistanceCode {
 
         for code in 0..POSTFIX_CODE_COUNT {
             let bits = 1 + (code >> 1);
-            let base = (((2 + usize::from(code & 1)) << bits) - 4)
-                + usize::from(direct_codes)
-                + 1;
+            let base = (((2 + usize::from(code & 1)) << bits) - 4) + usize::from(direct_codes) + 1;
             let range = 1_usize << bits;
             if distance >= base && distance - base < range {
                 return Self {
