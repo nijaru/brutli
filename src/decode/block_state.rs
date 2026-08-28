@@ -153,7 +153,10 @@ mod tests {
         let mut reader = BitReader::default();
         let mut cursor = 0;
 
-        assert_eq!(state.current(&partition, &mut reader, &[], &mut cursor), Some(0));
+        assert_eq!(
+            state.current(&partition, &mut reader, &[], &mut cursor),
+            Some(0)
+        );
         assert_eq!(state.remaining(), Some(2));
         state.consume(&partition, 1);
         assert_eq!(state.remaining(), Some(1));
@@ -200,12 +203,7 @@ mod tests {
 
         let mut second_cursor = 0;
         assert_eq!(
-            state.current(
-                &partition,
-                &mut reader,
-                &[0x12, 0, 0],
-                &mut second_cursor,
-            ),
+            state.current(&partition, &mut reader, &[0x12, 0, 0], &mut second_cursor,),
             Some(1)
         );
         assert_eq!(state.remaining(), Some(16625 + 0x1234));
