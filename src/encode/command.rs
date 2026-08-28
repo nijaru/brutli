@@ -37,7 +37,7 @@ pub(super) struct ExplicitCommand {
 impl InsertCommand {
     pub(super) fn for_length(length: usize) -> Self {
         let insert = length_code(length, &INSERT_BASE, &INSERT_EXTRA_BITS);
-        let symbol = implicit_command_symbol(insert.code, 0);
+        let symbol = terminal_command_symbol(insert.code);
         Self { symbol, insert }
     }
 
@@ -81,12 +81,14 @@ fn length_code(length: usize, bases: &[usize; 24], extra_bits: &[u8; 24]) -> Len
     }
 }
 
-fn implicit_command_symbol(insert_code: usize, copy_code: usize) -> u16 {
-    debug_assert!(insert_code < 8);
-    debug_assert!(copy_code < 16);
-
-    let range = if copy_code < 8 { 0 } else { 1 };
-    (range * 64 + insert_code * 8 + copy_code % 8) as u16
+fn terminal_command_symbol(insert_code: usize) -> u16 {
+    let range = match insert_code / 8 {
+        0 => 0,
+        1 => 4,
+        2 => 7,
+        _ => unreachable!(),
+    };
+    (range * 64 + (insert_code % 8) * 8) as u16
 }
 
 fn explicit_command_symbol(insert_code: usize, copy_code: usize) -> u16 {
