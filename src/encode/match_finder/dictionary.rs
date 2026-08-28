@@ -76,8 +76,7 @@ fn build_index() -> DictionaryIndex {
     let mut heads = vec![NONE; HASH_SIZE];
     let mut entries = Vec::with_capacity(capacity);
 
-    for length in 4..=24 {
-        let bits = SIZE_BITS_BY_LENGTH[length];
+    for (length, &bits) in SIZE_BITS_BY_LENGTH.iter().enumerate().take(25).skip(4) {
         if bits == 0 {
             continue;
         }
