@@ -10,6 +10,9 @@
 use std::fmt;
 
 mod decode;
+mod reader;
+
+pub use reader::DecoderReader;
 
 /// The resource the decoder needs next, or completion of the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
