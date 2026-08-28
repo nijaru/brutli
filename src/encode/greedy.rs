@@ -117,14 +117,16 @@ mod tests {
 
     #[test]
     fn greedy_stream_round_trips_mixed_distances() {
-        let source = b"alpha beta gamma alpha beta delta alpha beta gamma alpha beta delta".repeat(64);
+        let source =
+            b"alpha beta gamma alpha beta delta alpha beta gamma alpha beta delta".repeat(64);
         let encoded = try_compress(&source).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
     #[test]
     fn reference_decoder_accepts_greedy_output() {
-        let source = b"general greedy LZ77 should interoperate with the Brotli reference decoder. ".repeat(128);
+        let source = b"general greedy LZ77 should interoperate with the Brotli reference decoder. "
+            .repeat(128);
         let encoded = try_compress(&source).unwrap();
         let mut decoded = vec![0_u8; source.len() + 1];
         let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
