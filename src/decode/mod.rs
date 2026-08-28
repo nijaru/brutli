@@ -18,6 +18,8 @@ mod differential_tests;
 mod distance;
 mod history;
 #[cfg(test)]
+mod history_model_tests;
+#[cfg(test)]
 mod malformed_tests;
 mod metablock_header;
 mod prefix_code;
