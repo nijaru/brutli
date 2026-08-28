@@ -48,9 +48,12 @@ impl Case {
 
         let mut decoded = vec![0_u8; source.len() + 1];
         let info = brotli_decompressor::brotli_decode(&compressed, &mut decoded);
-        assert_eq!(
+        let succeeded = matches!(
             info.result,
-            brotli_decompressor::BrotliResult::ResultSuccess,
+            brotli_decompressor::BrotliResult::ResultSuccess
+        );
+        assert!(
+            succeeded,
             "rust-brotli direct-slice fixture failed: {:?}",
             info.error_code
         );
