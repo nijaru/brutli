@@ -1,5 +1,7 @@
 use super::bit_reader::BitReader;
-use super::compressed_block::{CompressedBlock, CompressedBlockError, CompressedProgress, CompressedStatus};
+use super::compressed_block::{
+    CompressedBlock, CompressedBlockError, CompressedProgress, CompressedStatus,
+};
 use super::compressed_header::{CompressedHeader, CompressedHeaderDecoder, CompressedHeaderError};
 use super::compressed_trees::CompressedTreesDecoder;
 use super::distance::RecentDistances;
