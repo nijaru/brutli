@@ -1,9 +1,11 @@
 mod block_split;
 
 use block_split::{
-    BlockCursor, BlockSplitEncoding, split_commands, split_distances, split_literals,
-    write_trivial_context_map,
+    BlockCursor, BlockSplitEncoding, split_commands, split_contextual_literals, split_distances,
+    split_literals, write_context_map, write_trivial_context_map,
 };
+
+use crate::decode::context::LiteralContextMode;
 
 use super::bit_writer::BitWriter;
 use super::command::{ExplicitCommand, InsertCommand};
@@ -17,12 +19,34 @@ use super::{
 
 const GREEDY_DIRECT_DISTANCE_CODES: u16 = 0;
 const UTF8_LITERAL_CONTEXT_MODE: u64 = 2;
+const CONTEXT_SAMPLE_STRIDE: usize = 4096;
+const CONTEXT_SAMPLE_LENGTH: usize = 64;
+const COMPLEX_CONTEXT_MIN_SIZE: usize = 1 << 20;
+const CONTEXT_SAVINGS_THRESHOLD: f64 = 0.2;
+
+const NO_LITERAL_CONTEXT_MAP: [u8; 64] = [0; 64];
+const SIMPLE_UTF8_CONTEXT_MAP: [u8; 64] = [
+    0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+];
+const COMPLEX_UTF8_CONTEXT_MAP: [u8; 64] = [
+    11, 11, 12, 12, 0, 0, 0, 0, 1, 1, 9, 9, 2, 2, 2, 2, 1, 1, 1, 1, 8, 3, 3, 3, 1, 1, 1,
+    1, 2, 2, 2, 2, 8, 4, 4, 4, 8, 7, 4, 4, 8, 0, 0, 0, 3, 3, 3, 3, 5, 5, 10, 5, 5, 5,
+    10, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+];
 
 #[derive(Debug, Clone, Copy)]
 struct EncodedMatch {
     parsed: MatchCommand,
     command: ExplicitCommand,
     distance: Option<DistanceCode>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiteralContextPlan {
+    count: usize,
+    map: &'static [u8; 64],
 }
 
 struct EncodingPlan<'a> {
@@ -33,6 +57,7 @@ struct EncodingPlan<'a> {
     command_code: &'a PrefixEncoding,
     distance_code: &'a PrefixEncoding,
     distance_alphabet: u16,
+    literal_context: LiteralContextPlan,
 }
 
 pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
@@ -45,12 +70,14 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    let literal_context = choose_q5_literal_context(input);
     let distance_alphabet = alphabet_size(GREEDY_DIRECT_DISTANCE_CODES);
     let mut literal_frequencies = vec![0_usize; usize::from(LITERAL_ALPHABET_SIZE)];
     let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
     let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
     let mut commands = Vec::with_capacity(parse.commands.len());
     let mut literal_data = Vec::new();
+    let mut contextual_literal_data = (literal_context.count > 1).then(Vec::new);
     let mut command_data = Vec::with_capacity(parse.commands.len() + 1);
     let mut distance_data = Vec::new();
 
@@ -69,9 +96,17 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
             distance_frequencies[usize::from(distance.symbol)] += 1;
             distance_data.push(distance.symbol);
         }
-        let literals = &input[parsed.insert_start..parsed.insert_start + parsed.insert_length];
-        count_literals(&mut literal_frequencies, literals);
-        literal_data.extend_from_slice(literals);
+        let literal_start = parsed.insert_start;
+        let literal_end = literal_start + parsed.insert_length;
+        collect_literals(
+            input,
+            literal_start,
+            literal_end,
+            literal_context,
+            &mut literal_frequencies,
+            &mut literal_data,
+            contextual_literal_data.as_mut(),
+        );
         commands.push(EncodedMatch {
             parsed,
             command,
@@ -86,8 +121,15 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         let command = InsertCommand::for_length(tail.len());
         command_frequencies[usize::from(command.symbol)] += 1;
         command_data.push(command.symbol);
-        count_literals(&mut literal_frequencies, tail);
-        literal_data.extend_from_slice(tail);
+        collect_literals(
+            input,
+            parse.tail_start,
+            input.len(),
+            literal_context,
+            &mut literal_frequencies,
+            &mut literal_data,
+            contextual_literal_data.as_mut(),
+        );
         Some(command)
     };
 
@@ -105,10 +147,17 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         command_code: &command_code,
         distance_code: &distance_code,
         distance_alphabet,
+        literal_context,
     };
 
     let single_tree = encode_single_tree(&plan, &literal_code);
-    let split_tree = encode_greedy_splits(&plan, &literal_data, &command_data, &distance_data)?;
+    let split_tree = encode_greedy_splits(
+        &plan,
+        &literal_data,
+        contextual_literal_data.as_deref(),
+        &command_data,
+        &distance_data,
+    )?;
     Some(if split_tree.len() < single_tree.len() {
         split_tree
     } else {
@@ -156,10 +205,15 @@ fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) ->
 fn encode_greedy_splits(
     plan: &EncodingPlan<'_>,
     literals: &[u8],
+    contextual_literals: Option<&[(u8, u8)]>,
     command_symbols: &[u16],
     distance_symbols: &[u16],
 ) -> Option<Vec<u8>> {
-    let literal_result = split_literals(literals);
+    let literal_result = if plan.literal_context.count == 1 {
+        split_literals(literals)
+    } else {
+        split_contextual_literals(contextual_literals?, plan.literal_context.count)
+    };
     let command_result = split_commands(command_symbols);
     let distance_result = split_distances(distance_symbols, usize::from(plan.distance_alphabet));
 
@@ -181,7 +235,12 @@ fn encode_greedy_splits(
     for _ in 0..literal_split.num_types() {
         writer.write_bits(UTF8_LITERAL_CONTEXT_MODE, 2);
     }
-    write_trivial_context_map(&mut writer, literal_codes.len(), 6)?;
+    write_literal_context_map(
+        &mut writer,
+        literal_split.num_types(),
+        literal_codes.len(),
+        plan.literal_context,
+    )?;
     write_trivial_context_map(&mut writer, distance_codes.len(), 2)?;
 
     for code in &literal_codes {
@@ -201,12 +260,14 @@ fn encode_greedy_splits(
         let command_tree = command_cursor.before_symbol(&mut writer);
         command_codes[command_tree].write_symbol(&mut writer, encoded.command.symbol);
         encoded.command.write_extra(&mut writer);
-        write_split_literal_slice(
+        write_split_literal_range(
             &mut writer,
             &mut literal_cursor,
             &literal_codes,
-            &plan.input[encoded.parsed.insert_start
-                ..encoded.parsed.insert_start + encoded.parsed.insert_length],
+            plan.input,
+            encoded.parsed.insert_start,
+            encoded.parsed.insert_start + encoded.parsed.insert_length,
+            plan.literal_context,
         );
         if let Some(distance) = encoded.distance {
             let distance_tree = distance_cursor.before_symbol(&mut writer);
@@ -219,10 +280,148 @@ fn encode_greedy_splits(
         let command_tree = command_cursor.before_symbol(&mut writer);
         command_codes[command_tree].write_symbol(&mut writer, command.symbol);
         command.write_extra(&mut writer);
-        write_split_literal_slice(&mut writer, &mut literal_cursor, &literal_codes, plan.tail);
+        write_split_literal_range(
+            &mut writer,
+            &mut literal_cursor,
+            &literal_codes,
+            plan.input,
+            plan.input.len() - plan.tail.len(),
+            plan.input.len(),
+            plan.literal_context,
+        );
     }
 
     Some(writer.finish())
+}
+
+fn choose_q5_literal_context(input: &[u8]) -> LiteralContextPlan {
+    if input.len() < CONTEXT_SAMPLE_LENGTH {
+        return LiteralContextPlan {
+            count: 1,
+            map: &NO_LITERAL_CONTEXT_MAP,
+        };
+    }
+    if input.len() >= COMPLEX_CONTEXT_MIN_SIZE && should_use_complex_context(input) {
+        return LiteralContextPlan {
+            count: 13,
+            map: &COMPLEX_UTF8_CONTEXT_MAP,
+        };
+    }
+
+    const PREFIX_CLASS: [usize; 4] = [0, 0, 1, 2];
+    let mut bigrams = [0_usize; 9];
+    for start in (0..=input.len() - CONTEXT_SAMPLE_LENGTH).step_by(CONTEXT_SAMPLE_STRIDE) {
+        let mut previous = PREFIX_CLASS[usize::from(input[start] >> 6)] * 3;
+        for &literal in &input[start + 1..start + CONTEXT_SAMPLE_LENGTH] {
+            let current = PREFIX_CLASS[usize::from(literal >> 6)];
+            bigrams[previous + current] += 1;
+            previous = current * 3;
+        }
+    }
+
+    let mut monograms = [0_usize; 3];
+    let mut two_prefix = [0_usize; 6];
+    for (index, &count) in bigrams.iter().enumerate() {
+        monograms[index % 3] += count;
+        two_prefix[index % 6] += count;
+    }
+    let total = monograms.iter().sum::<usize>();
+    debug_assert!(total != 0);
+    let entropy_one = estimate_entropy(&monograms) / total as f64;
+    let entropy_two =
+        (estimate_entropy(&two_prefix[..3]) + estimate_entropy(&two_prefix[3..])) / total as f64;
+
+    if entropy_one - entropy_two < CONTEXT_SAVINGS_THRESHOLD {
+        LiteralContextPlan {
+            count: 1,
+            map: &NO_LITERAL_CONTEXT_MAP,
+        }
+    } else {
+        LiteralContextPlan {
+            count: 2,
+            map: &SIMPLE_UTF8_CONTEXT_MAP,
+        }
+    }
+}
+
+fn should_use_complex_context(input: &[u8]) -> bool {
+    let mut combined = [0_usize; 32];
+    let mut contextual = [[0_usize; 32]; 13];
+    let mut total = 0_usize;
+
+    for start in (0..=input.len() - CONTEXT_SAMPLE_LENGTH).step_by(CONTEXT_SAMPLE_STRIDE) {
+        let mut second_previous = input[start];
+        let mut previous = input[start + 1];
+        for &literal in &input[start + 2..start + CONTEXT_SAMPLE_LENGTH] {
+            let context_id = LiteralContextMode::Utf8.id(previous, second_previous);
+            let context = usize::from(COMPLEX_UTF8_CONTEXT_MAP[usize::from(context_id)]);
+            let bucket = usize::from(literal >> 3);
+            total += 1;
+            combined[bucket] += 1;
+            contextual[context][bucket] += 1;
+            second_previous = previous;
+            previous = literal;
+        }
+    }
+
+    let entropy_one = estimate_entropy(&combined) / total as f64;
+    let entropy_context = contextual.iter().map(|histogram| estimate_entropy(histogram)).sum::<f64>()
+        / total as f64;
+    entropy_context <= 3.0 && entropy_one - entropy_context >= CONTEXT_SAVINGS_THRESHOLD
+}
+
+fn estimate_entropy(histogram: &[usize]) -> f64 {
+    let total = histogram.iter().sum::<usize>();
+    if total == 0 {
+        return 0.0;
+    }
+    let total_log = (total as f64).log2();
+    histogram
+        .iter()
+        .filter(|&&count| count != 0)
+        .map(|&count| count as f64 * (total_log - (count as f64).log2()))
+        .sum()
+}
+
+fn collect_literals(
+    input: &[u8],
+    start: usize,
+    end: usize,
+    context_plan: LiteralContextPlan,
+    frequencies: &mut [usize],
+    literals: &mut Vec<u8>,
+    contextual_literals: Option<&mut Vec<(u8, u8)>>,
+) {
+    let mut contextual_literals = contextual_literals;
+    for position in start..end {
+        let literal = input[position];
+        frequencies[usize::from(literal)] += 1;
+        literals.push(literal);
+        if let Some(samples) = contextual_literals.as_deref_mut() {
+            let context_id = utf8_context_id(input, position);
+            samples.push((literal, context_plan.map[context_id]));
+        }
+    }
+}
+
+fn write_literal_context_map(
+    writer: &mut BitWriter,
+    block_types: usize,
+    literal_trees: usize,
+    context_plan: LiteralContextPlan,
+) -> Option<()> {
+    if context_plan.count == 1 {
+        return write_trivial_context_map(writer, literal_trees, 6);
+    }
+
+    let mut map = Vec::with_capacity(block_types * 64);
+    for block_type in 0..block_types {
+        let tree_offset = block_type * context_plan.count;
+        for &context in context_plan.map {
+            map.push(u8::try_from(tree_offset + usize::from(context)).ok()?);
+        }
+    }
+    write_context_map(writer, &map, literal_trees)
 }
 
 fn prefix_codes(histograms: Vec<Vec<usize>>, alphabet_size: u16) -> Option<Vec<PrefixEncoding>> {
@@ -242,10 +441,10 @@ fn seed_empty_histogram(frequencies: &mut [usize]) {
     }
 }
 
-fn count_literals(frequencies: &mut [usize], literals: &[u8]) {
-    for &literal in literals {
-        frequencies[usize::from(literal)] += 1;
-    }
+fn utf8_context_id(input: &[u8], position: usize) -> usize {
+    let previous = position.checked_sub(1).map_or(0, |index| input[index]);
+    let second_previous = position.checked_sub(2).map_or(0, |index| input[index]);
+    usize::from(LiteralContextMode::Utf8.id(previous, second_previous))
 }
 
 fn write_literal_slice(writer: &mut BitWriter, code: &PrefixEncoding, literals: &[u8]) {
@@ -254,21 +453,32 @@ fn write_literal_slice(writer: &mut BitWriter, code: &PrefixEncoding, literals: 
     }
 }
 
-fn write_split_literal_slice(
+fn write_split_literal_range(
     writer: &mut BitWriter,
     cursor: &mut BlockCursor<'_>,
     codes: &[PrefixEncoding],
-    literals: &[u8],
+    input: &[u8],
+    start: usize,
+    end: usize,
+    context_plan: LiteralContextPlan,
 ) {
-    for &literal in literals {
-        let tree = cursor.before_symbol(writer);
-        codes[tree].write_symbol(writer, u16::from(literal));
+    for position in start..end {
+        let block_type = cursor.before_symbol(writer);
+        let context = if context_plan.count == 1 {
+            0
+        } else {
+            context_plan.map[utf8_context_id(input, position)]
+        };
+        let tree = block_type * context_plan.count + usize::from(context);
+        codes[tree].write_symbol(writer, u16::from(input[position]));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::try_compress;
+    use super::{
+        COMPLEX_UTF8_CONTEXT_MAP, SIMPLE_UTF8_CONTEXT_MAP, choose_q5_literal_context, try_compress,
+    };
     use crate::decompress;
 
     #[test]
@@ -299,6 +509,18 @@ mod tests {
         source.extend(b"function(x){return x*x+17;} const value = 123456789; ".repeat(256));
         let encoded = try_compress(&source).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn q5_context_maps_match_reference_shapes() {
+        assert_eq!(&SIMPLE_UTF8_CONTEXT_MAP[..4], &[0, 0, 1, 1]);
+        assert_eq!(SIMPLE_UTF8_CONTEXT_MAP.iter().filter(|&&value| value == 1).count(), 2);
+        assert_eq!(COMPLEX_UTF8_CONTEXT_MAP.iter().copied().max(), Some(12));
+    }
+
+    #[test]
+    fn short_input_skips_literal_context_modeling() {
+        assert_eq!(choose_q5_literal_context(&[b'a'; 63]).count, 1);
     }
 
     #[test]
