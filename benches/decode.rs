@@ -142,12 +142,15 @@ fn bench_brutli_one_shot(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
 }
 
 fn bench_brutli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    let mut output = vec![0_u8; case.source.len() + 1];
     bencher
         .counter(BytesCount::new(case.source.len()))
-        .bench(|| {
-            let mut output = vec![0_u8; case.source.len() + 1];
-            let decoded_size = brutli_decode_into(divan::black_box(&case.compressed), &mut output);
-            divan::black_box((output, decoded_size))
+        .bench_local(move || {
+            let decoded_size = brutli_decode_into(
+                divan::black_box(&case.compressed),
+                divan::black_box(&mut output),
+            );
+            divan::black_box(decoded_size)
         });
 }
 
@@ -164,13 +167,15 @@ fn bench_brutli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
 }
 
 fn bench_rust_brotli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    let mut output = vec![0_u8; case.source.len() + 1];
     bencher
         .counter(BytesCount::new(case.source.len()))
-        .bench(|| {
-            let mut output = vec![0_u8; case.source.len() + 1];
-            let info =
-                brotli_decompressor::brotli_decode(divan::black_box(&case.compressed), &mut output);
-            divan::black_box((output, info.decoded_size))
+        .bench_local(move || {
+            let info = brotli_decompressor::brotli_decode(
+                divan::black_box(&case.compressed),
+                divan::black_box(&mut output),
+            );
+            divan::black_box(info.decoded_size)
         });
 }
 
