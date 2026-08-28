@@ -1,6 +1,6 @@
 use super::bit_reader::BitReader;
 use super::block_state::BlockState;
-use super::command::{Command, CommandDecoder};
+use super::command::CommandDecoder;
 use super::compressed_header::CompressedHeader;
 use super::compressed_trees::CompressedTrees;
 use super::context::LiteralContextMode;
@@ -125,12 +125,9 @@ impl CompressedBlock {
                         return Ok(progress(output_cursor, CompressedStatus::NeedInput));
                     };
                     let tree = &self.trees.command[usize::from(block_type)];
-                    let Some(symbol) = tree.decode(
-                        &mut self.command_symbol,
-                        reader,
-                        input,
-                        input_cursor,
-                    ) else {
+                    let Some(symbol) =
+                        tree.decode(&mut self.command_symbol, reader, input, input_cursor)
+                    else {
                         return Ok(progress(output_cursor, CompressedStatus::NeedInput));
                     };
                     self.command_blocks
@@ -171,7 +168,7 @@ impl CompressedBlock {
                         }
 
                         self.phase = if implicit_distance_zero {
-                            self.begin_copy(copy_length, recent_distances.last(), history, false)?
+                            self.begin_copy(copy_length, recent_distances.last(), history)?
                         } else {
                             Phase::Distance { copy_length }
                         };
@@ -198,12 +195,9 @@ impl CompressedBlock {
                     let map_index = usize::from(block_type) * 64 + usize::from(context);
                     let tree_index = usize::from(self.header.literal_context_map[map_index]);
                     let tree = &self.trees.literal[tree_index];
-                    let Some(literal) = tree.decode(
-                        &mut self.literal_symbol,
-                        reader,
-                        input,
-                        input_cursor,
-                    ) else {
+                    let Some(literal) =
+                        tree.decode(&mut self.literal_symbol, reader, input, input_cursor)
+                    else {
                         return Ok(progress(output_cursor, CompressedStatus::NeedInput));
                     };
 
@@ -233,12 +227,9 @@ impl CompressedBlock {
                     let map_index = usize::from(block_type) * 4 + usize::from(context);
                     let tree_index = usize::from(self.header.distance_context_map[map_index]);
                     let tree = &self.trees.distance[tree_index];
-                    let Some(symbol) = tree.decode(
-                        &mut self.distance_symbol,
-                        reader,
-                        input,
-                        input_cursor,
-                    ) else {
+                    let Some(symbol) =
+                        tree.decode(&mut self.distance_symbol, reader, input, input_cursor)
+                    else {
                         return Ok(progress(output_cursor, CompressedStatus::NeedInput));
                     };
                     self.distance_blocks
@@ -260,15 +251,11 @@ impl CompressedBlock {
                         return Ok(progress(output_cursor, CompressedStatus::NeedInput));
                     };
                     self.distance_decoder = None;
-                    self.phase = self.begin_copy(
-                        copy_length,
-                        distance.value,
-                        history,
-                        distance.should_push,
-                    )?;
-                    if distance.should_push && distance.value <= history.max_backward_distance() {
+                    let phase = self.begin_copy(copy_length, distance.value, history)?;
+                    if distance.should_push {
                         recent_distances.push(distance.value);
                     }
+                    self.phase = phase;
                 }
                 Phase::Copy {
                     remaining,
@@ -282,11 +269,8 @@ impl CompressedBlock {
                         return Ok(progress(output_cursor, CompressedStatus::NeedOutput));
                     }
 
-                    let produced = history.copy_into(
-                        distance,
-                        remaining,
-                        &mut output[output_cursor..],
-                    )?;
+                    let produced =
+                        history.copy_into(distance, remaining, &mut output[output_cursor..])?;
                     output_cursor += produced;
                     self.remaining -= produced;
                     self.phase = Phase::Copy {
@@ -306,7 +290,6 @@ impl CompressedBlock {
         copy_length: usize,
         distance: usize,
         history: &History,
-        _should_push: bool,
     ) -> Result<Phase, CompressedBlockError> {
         if distance > history.max_backward_distance() {
             return Err(CompressedBlockError::DictionaryReference {
