@@ -70,3 +70,17 @@ fn finish_reports_truncated_input() {
 
     assert_eq!(decoder.finish(&mut output), Err(DecodeError::UnexpectedEof));
 }
+
+#[test]
+fn window_limit_rejects_stream_before_history_growth() {
+    let mut decoder = Decoder::with_max_window_bits(20);
+    let mut output = [];
+
+    assert_eq!(
+        decoder.process(&[0b0001111], &mut output),
+        Err(DecodeError::WindowLimitExceeded {
+            window_bits: 24,
+            max_window_bits: 20,
+        })
+    );
+}
