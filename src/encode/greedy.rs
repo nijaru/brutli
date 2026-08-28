@@ -60,9 +60,9 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
             parsed.copy_length_code,
             parsed.distance_code == 0,
         );
-        let distance = command.requires_distance().then(|| {
-            DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES)
-        });
+        let distance = command
+            .requires_distance()
+            .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES));
         command_frequencies[usize::from(command.symbol)] += 1;
         command_data.push(command.symbol);
         if let Some(distance) = distance {
