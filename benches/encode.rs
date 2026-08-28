@@ -116,21 +116,13 @@ fn bench_brutli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
         .bench(|| brutli::compress(divan::black_box(case.source.as_slice())));
 }
 
-fn bench_rust_brotli(
-    bencher: divan::Bencher<'_, '_>,
-    case: &'static Case,
-    quality: u32,
-) {
+fn bench_rust_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quality: u32) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| rust_brotli_compress(divan::black_box(case.source.as_slice()), quality));
 }
 
-fn bench_google_brotli(
-    bencher: divan::Bencher<'_, '_>,
-    case: &'static Case,
-    quality: i32,
-) {
+fn bench_google_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quality: i32) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| google_brotli_compress(divan::black_box(case.source.as_slice()), quality));
