@@ -14,7 +14,27 @@ fi
 PERF_RUNS="${PERF_RUNS:-5}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-10}"
 SAMPLE_SIZE="${SAMPLE_SIZE:-1000}"
-RECORD_SAMPLE_SIZE="${RECORD_SAMPLE_SIZE:-5000}"
+RECORD_SAMPLE_SIZE="${RECORD_SAMPLE_SIZE:-20000}"
+PROFILE_CPU="${PROFILE_CPU:-}"
+
+# Hybrid Intel hosts expose the performance-core PMU as cpu_core. Pinning the
+# benchmark to one of those CPUs avoids mixing P-core and E-core counters.
+if [[ -z "${PROFILE_CPU}" && -r /sys/bus/event_source/devices/cpu_core/cpus ]]; then
+  cpu_list="$(cat /sys/bus/event_source/devices/cpu_core/cpus)"
+  PROFILE_CPU="$(printf '%s\n' "${cpu_list}" | sed 's/,.*//; s/-.*//')"
+fi
+
+runner=()
+if [[ -n "${PROFILE_CPU}" ]]; then
+  if ! command -v taskset >/dev/null 2>&1; then
+    echo "error: PROFILE_CPU is set but taskset is not installed" >&2
+    exit 1
+  fi
+  runner=(taskset -c "${PROFILE_CPU}")
+  echo "profiling on CPU ${PROFILE_CPU}"
+else
+  echo "profiling without CPU pinning"
+fi
 
 cargo bench --bench decode --no-run
 
@@ -37,40 +57,47 @@ run_stat() {
   perf stat \
     -r "${PERF_RUNS}" \
     -e "${events}" \
-    -- "${bench_binary}" \
+    -- "${runner[@]}" "${bench_binary}" \
     --bench \
     "${filter}" \
     --sample-count "${SAMPLE_COUNT}" \
     --sample-size "${SAMPLE_SIZE}"
 }
 
-# Profile Brutli on each corpus, then the two direct comparators on the binary
-# corpus where hosted-CI measurements disagree most strongly.
-run_stat 'binary::brutli_direct$'
-run_stat 'repetitive::brutli_direct$'
-run_stat 'text::brutli_direct$'
-run_stat 'binary::google_brotli_direct$'
-run_stat 'binary::rust_brotli_direct$'
+record_case() {
+  local case_name="$1"
+  local data_file="perf-brutli-${case_name}.data"
+  local report_file="perf-brutli-${case_name}.txt"
 
-echo
-echo "== recording binary::brutli_direct =="
-perf record \
-  -F 999 \
-  -g \
-  --call-graph dwarf \
-  -o perf-brutli-binary.data \
-  -- "${bench_binary}" \
-  --bench \
-  'binary::brutli_direct$' \
-  --sample-count "${SAMPLE_COUNT}" \
-  --sample-size "${RECORD_SAMPLE_SIZE}"
+  echo
+  echo "== recording ${case_name}::brutli_direct =="
+  perf record \
+    -F 999 \
+    -g \
+    --call-graph dwarf \
+    -o "${data_file}" \
+    -- "${runner[@]}" "${bench_binary}" \
+    --bench \
+    "${case_name}::brutli_direct$" \
+    --sample-count "${SAMPLE_COUNT}" \
+    --sample-size "${RECORD_SAMPLE_SIZE}"
 
-perf report \
-  --stdio \
-  --no-children \
-  -i perf-brutli-binary.data \
-  > perf-brutli-binary.txt
+  perf report \
+    --stdio \
+    --no-children \
+    -i "${data_file}" \
+    > "${report_file}"
 
-echo
-echo "wrote perf-brutli-binary.data"
-echo "wrote perf-brutli-binary.txt"
+  echo "wrote ${data_file}"
+  echo "wrote ${report_file}"
+}
+
+for case_name in binary repetitive text; do
+  run_stat "${case_name}::brutli_direct$"
+  run_stat "${case_name}::google_brotli_direct$"
+  run_stat "${case_name}::rust_brotli_direct$"
+done
+
+for case_name in binary repetitive text; do
+  record_case "${case_name}"
+done
