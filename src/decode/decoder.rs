@@ -1,4 +1,5 @@
 use super::bit_reader::BitReader;
+use super::history::History;
 use super::metablock_header::{MetaBlockHeaderDecoder, MetaBlockHeaderError, MetaBlockKind};
 use super::stream_header::{StreamHeaderDecoder, StreamHeaderError};
 
@@ -42,6 +43,7 @@ pub(super) struct Decoder {
     metablock_header: MetaBlockHeaderDecoder,
     phase: Phase,
     window_bits: Option<u8>,
+    history: Option<History>,
 }
 
 #[derive(Debug, Default)]
@@ -82,7 +84,9 @@ impl Decoder {
                         });
                     };
 
-                    self.window_bits = Some(header.window_bits());
+                    let window_bits = header.window_bits();
+                    self.window_bits = Some(window_bits);
+                    self.history = Some(History::new(window_bits));
                     self.phase = Phase::MetaBlockHeader;
                 }
                 Phase::MetaBlockHeader => {
@@ -138,8 +142,12 @@ impl Decoder {
                         .min(output.len() - output_cursor);
                     let input_end = input_cursor + count;
                     let output_end = output_cursor + count;
-                    output[output_cursor..output_end]
-                        .copy_from_slice(&input[input_cursor..input_end]);
+                    let bytes = &input[input_cursor..input_end];
+                    output[output_cursor..output_end].copy_from_slice(bytes);
+                    self.history
+                        .as_mut()
+                        .expect("history is initialized after the stream header")
+                        .push_slice(bytes);
                     input_cursor = input_end;
                     output_cursor = output_end;
                     self.phase = Phase::Uncompressed {
@@ -185,6 +193,11 @@ impl Decoder {
     #[cfg(test)]
     fn window_bits(&self) -> Option<u8> {
         self.window_bits
+    }
+
+    #[cfg(test)]
+    fn history_previous_bytes(&self) -> Option<(u8, u8)> {
+        self.history.as_ref().map(History::previous_bytes)
     }
 }
 
@@ -279,6 +292,7 @@ mod tests {
         assert_eq!(result.consumed, input.len());
         assert_eq!(result.produced, 0);
         assert_eq!(decoder.window_bits(), Some(16));
+        assert_eq!(decoder.history_previous_bytes(), Some((0, 0)));
     }
 
     #[test]
@@ -293,6 +307,7 @@ mod tests {
         assert_eq!(result.consumed, input.len());
         assert_eq!(result.produced, output.len());
         assert_eq!(&output, b"brutli");
+        assert_eq!(decoder.history_previous_bytes(), Some((b'i', b'l')));
     }
 
     #[test]
@@ -314,6 +329,7 @@ mod tests {
         assert_eq!(second.status, ProcessStatus::Done);
         assert_eq!(&second_output, b"cdef");
         assert_eq!(first.consumed + second.consumed, input.len());
+        assert_eq!(decoder.history_previous_bytes(), Some((b'f', b'e')));
     }
 
     #[test]
@@ -335,10 +351,11 @@ mod tests {
         assert_eq!(second.status, ProcessStatus::Done);
         assert_eq!(second.produced, output.len());
         assert_eq!(&output, b"abcdef");
+        assert_eq!(decoder.history_previous_bytes(), Some((b'f', b'e')));
     }
 
     #[test]
-    fn skips_metadata_without_producing_output() {
+    fn skips_metadata_without_producing_output_or_history() {
         let input = metadata_then_end(b"metadata");
         let mut decoder = Decoder::default();
         let mut output = [];
@@ -348,6 +365,7 @@ mod tests {
         assert_eq!(result.status, ProcessStatus::Done);
         assert_eq!(result.consumed, input.len());
         assert_eq!(result.produced, 0);
+        assert_eq!(decoder.history_previous_bytes(), Some((0, 0)));
     }
 
     #[test]
