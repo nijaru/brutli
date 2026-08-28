@@ -7,7 +7,9 @@ on:
       - .github/workflows/benchmark.yml
       - Cargo.toml
       - benches/decode.rs
+      - benches/encode.rs
       - "src/decode/**"
+      - "src/encode/**"
 
 permissions:
   contents: read
@@ -20,3 +22,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Decoder benchmark
         run: cargo bench --bench decode -- --sample-count 20 --sample-size 1
+
+  encode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Encoder benchmark
+        run: cargo bench --bench encode -- --sample-count 20 --sample-size 1
