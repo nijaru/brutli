@@ -19,7 +19,10 @@ pub(super) struct Parse {
 }
 
 pub(super) fn greedy_parse(input: &[u8]) -> Parse {
-    assert!(u32::try_from(input.len()).is_ok(), "match input exceeds u32 position range");
+    assert!(
+        u32::try_from(input.len()).is_ok(),
+        "match input exceeds u32 position range"
+    );
 
     if input.len() < MIN_MATCH * 2 {
         return Parse {
