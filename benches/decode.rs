@@ -13,6 +13,23 @@ impl Case {
         let mut encoder = brotli::CompressorReader::new(source.as_slice(), 4096, 5, 22);
         let mut compressed = Vec::new();
         encoder.read_to_end(&mut compressed).unwrap();
+
+        let decoded = brutli::decompress(&compressed, source.len()).unwrap();
+        assert_eq!(decoded, source, "Brutli benchmark fixture failed validation");
+
+        let mut reader = brotli::Decompressor::new(compressed.as_slice(), 4096);
+        let mut decoded = Vec::with_capacity(source.len());
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, source, "rust-brotli reader fixture failed validation");
+
+        let mut input = compressed.as_slice();
+        let mut decoded = Vec::with_capacity(source.len());
+        brotli::BrotliDecompress(&mut input, &mut decoded).unwrap();
+        assert_eq!(
+            decoded, source,
+            "rust-brotli stream-copy fixture failed validation"
+        );
+
         Self { source, compressed }
     }
 }
@@ -43,7 +60,7 @@ fn main() {
     divan::main();
 }
 
-fn bench_brutli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+fn bench_brutli_one_shot(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| {
@@ -51,7 +68,18 @@ fn bench_brutli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
         });
 }
 
-fn bench_rust_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+fn bench_brutli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    bencher
+        .counter(BytesCount::new(case.source.len()))
+        .bench(|| {
+            let mut decoder = brutli::DecoderReader::new(divan::black_box(case.compressed.as_slice()));
+            let mut output = Vec::with_capacity(case.source.len());
+            decoder.read_to_end(&mut output).unwrap();
+            output
+        });
+}
+
+fn bench_rust_brotli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
         .bench(|| {
@@ -63,32 +91,45 @@ fn bench_rust_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
         });
 }
 
-#[divan::bench]
-fn brutli_text(bencher: divan::Bencher<'_, '_>) {
-    bench_brutli(bencher, &TEXT);
+fn bench_rust_brotli_stream_copy(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
+    bencher
+        .counter(BytesCount::new(case.source.len()))
+        .bench(|| {
+            let mut input = divan::black_box(case.compressed.as_slice());
+            let mut output = Vec::with_capacity(case.source.len());
+            brotli::BrotliDecompress(&mut input, &mut output).unwrap();
+            output
+        });
 }
 
-#[divan::bench]
-fn rust_brotli_text(bencher: divan::Bencher<'_, '_>) {
-    bench_rust_brotli(bencher, &TEXT);
+macro_rules! decode_benches {
+    ($name:ident, $case:ident) => {
+        mod $name {
+            use super::*;
+
+            #[divan::bench]
+            fn brutli_one_shot(bencher: divan::Bencher<'_, '_>) {
+                bench_brutli_one_shot(bencher, &$case);
+            }
+
+            #[divan::bench]
+            fn brutli_reader(bencher: divan::Bencher<'_, '_>) {
+                bench_brutli_reader(bencher, &$case);
+            }
+
+            #[divan::bench]
+            fn rust_brotli_reader(bencher: divan::Bencher<'_, '_>) {
+                bench_rust_brotli_reader(bencher, &$case);
+            }
+
+            #[divan::bench]
+            fn rust_brotli_stream_copy(bencher: divan::Bencher<'_, '_>) {
+                bench_rust_brotli_stream_copy(bencher, &$case);
+            }
+        }
+    };
 }
 
-#[divan::bench]
-fn brutli_repetitive(bencher: divan::Bencher<'_, '_>) {
-    bench_brutli(bencher, &REPETITIVE);
-}
-
-#[divan::bench]
-fn rust_brotli_repetitive(bencher: divan::Bencher<'_, '_>) {
-    bench_rust_brotli(bencher, &REPETITIVE);
-}
-
-#[divan::bench]
-fn brutli_binary(bencher: divan::Bencher<'_, '_>) {
-    bench_brutli(bencher, &BINARY);
-}
-
-#[divan::bench]
-fn rust_brotli_binary(bencher: divan::Bencher<'_, '_>) {
-    bench_rust_brotli(bencher, &BINARY);
-}
+decode_benches!(text, TEXT);
+decode_benches!(repetitive, REPETITIVE);
+decode_benches!(binary, BINARY);
