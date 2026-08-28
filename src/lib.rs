@@ -48,6 +48,13 @@ pub enum DecodeError {
     InvalidCompressedData,
     /// Final alignment bits that must be zero were non-zero.
     NonZeroPadding,
+    /// The stream requests a window larger than the configured limit.
+    WindowLimitExceeded {
+        /// Window size requested by the stream, expressed as `WBITS`.
+        window_bits: u8,
+        /// Maximum accepted `WBITS` value.
+        max_window_bits: u8,
+    },
     /// The caller declared end-of-input before the stream completed.
     UnexpectedEof,
     /// Decoded output would exceed the configured limit.
@@ -71,6 +78,13 @@ impl fmt::Display for DecodeError {
             Self::InvalidMetaBlock => formatter.write_str("invalid Brotli metablock"),
             Self::InvalidCompressedData => formatter.write_str("invalid Brotli compressed data"),
             Self::NonZeroPadding => formatter.write_str("non-zero final Brotli padding"),
+            Self::WindowLimitExceeded {
+                window_bits,
+                max_window_bits,
+            } => write!(
+                formatter,
+                "Brotli stream requests WBITS={window_bits}, exceeding configured maximum {max_window_bits}"
+            ),
             Self::UnexpectedEof => formatter.write_str("unexpected end of Brotli input"),
             Self::OutputLimitExceeded { limit } => {
                 write!(formatter, "decoded output exceeds limit of {limit} bytes")
@@ -97,7 +111,7 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    /// Creates a decoder with no decoded-output limit.
+    /// Creates a decoder with no decoded-output limit and the full RFC 7932 window range.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -106,9 +120,28 @@ impl Decoder {
     /// Creates a decoder that rejects streams producing more than `limit` bytes.
     #[must_use]
     pub fn with_output_limit(limit: usize) -> Self {
+        Self::with_limits(Some(limit), 24)
+    }
+
+    /// Creates a decoder that rejects streams whose `WBITS` exceeds `max_window_bits`.
+    ///
+    /// RFC 7932 defines `WBITS` values from 10 through 24. Values at or above
+    /// 24 therefore accept every RFC 7932 window size; values below 10 reject
+    /// every valid RFC 7932 stream.
+    #[must_use]
+    pub fn with_max_window_bits(max_window_bits: u8) -> Self {
+        Self::with_limits(None, max_window_bits)
+    }
+
+    /// Creates a decoder with explicit output and window limits.
+    ///
+    /// `max_output_size = None` leaves decoded output unbounded. RFC 7932 uses
+    /// `WBITS` values from 10 through 24.
+    #[must_use]
+    pub fn with_limits(max_output_size: Option<usize>, max_window_bits: u8) -> Self {
         Self {
-            core: decode::CoreDecoder::default(),
-            output_limit: Some(limit),
+            core: decode::CoreDecoder::with_max_window_bits(max_window_bits),
+            output_limit: max_output_size,
             total_output: 0,
         }
     }
@@ -240,6 +273,13 @@ fn map_core_error(error: decode::CoreError) -> DecodeError {
         decode::CoreError::InvalidMetaBlock => DecodeError::InvalidMetaBlock,
         decode::CoreError::InvalidCompressedData => DecodeError::InvalidCompressedData,
         decode::CoreError::NonZeroPadding => DecodeError::NonZeroPadding,
+        decode::CoreError::WindowLimitExceeded {
+            window_bits,
+            max_window_bits,
+        } => DecodeError::WindowLimitExceeded {
+            window_bits,
+            max_window_bits,
+        },
     }
 }
 
