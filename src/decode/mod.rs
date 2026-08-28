@@ -62,12 +62,15 @@ impl CoreDecoder {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<CoreProgress, CoreError> {
-        let result = self.inner.process(input, output).map_err(|error| match error {
-            decoder::DecodeError::StreamHeader(_) => CoreError::InvalidStreamHeader,
-            decoder::DecodeError::MetaBlockHeader(_) => CoreError::InvalidMetaBlock,
-            decoder::DecodeError::Compressed(_) => CoreError::InvalidCompressedData,
-            decoder::DecodeError::NonZeroFinalPadding => CoreError::NonZeroPadding,
-        })?;
+        let result = self
+            .inner
+            .process(input, output)
+            .map_err(|error| match error {
+                decoder::DecodeError::StreamHeader(_) => CoreError::InvalidStreamHeader,
+                decoder::DecodeError::MetaBlockHeader(_) => CoreError::InvalidMetaBlock,
+                decoder::DecodeError::Compressed(_) => CoreError::InvalidCompressedData,
+                decoder::DecodeError::NonZeroFinalPadding => CoreError::NonZeroPadding,
+            })?;
 
         let status = match result.status {
             decoder::ProcessStatus::NeedInput => CoreStatus::NeedInput,
