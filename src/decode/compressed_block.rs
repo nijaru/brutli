@@ -4,6 +4,7 @@ use super::command::CommandDecoder;
 use super::compressed_header::CompressedHeader;
 use super::compressed_trees::CompressedTrees;
 use super::context::LiteralContextMode;
+use super::dictionary::{self, DictionaryError};
 use super::distance::{DistanceDecoder, DistanceError, RecentDistances};
 use super::history::{History, HistoryError};
 use super::prefix_code::PrefixSymbolDecoder;
@@ -26,7 +27,7 @@ pub(super) enum CompressedBlockError {
     MetaBlockOverflow,
     Distance(DistanceError),
     History(HistoryError),
-    DictionaryReference { distance: usize, copy_length: usize },
+    Dictionary(DictionaryError),
 }
 
 impl From<DistanceError> for CompressedBlockError {
@@ -38,6 +39,12 @@ impl From<DistanceError> for CompressedBlockError {
 impl From<HistoryError> for CompressedBlockError {
     fn from(error: HistoryError) -> Self {
         Self::History(error)
+    }
+}
+
+impl From<DictionaryError> for CompressedBlockError {
+    fn from(error: DictionaryError) -> Self {
+        Self::Dictionary(error)
     }
 }
 
@@ -53,8 +60,15 @@ pub(super) struct CompressedBlock {
     distance_symbol: PrefixSymbolDecoder,
     command_decoder: Option<CommandDecoder>,
     distance_decoder: Option<DistanceDecoder>,
+    dictionary_output: Option<DictionaryOutput>,
     remaining: usize,
     phase: Phase,
+}
+
+#[derive(Debug)]
+struct DictionaryOutput {
+    bytes: Vec<u8>,
+    offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +90,7 @@ enum Phase {
         remaining: usize,
         distance: usize,
     },
+    Dictionary,
     Done,
 }
 
@@ -92,6 +107,7 @@ impl CompressedBlock {
             distance_symbol: PrefixSymbolDecoder::default(),
             command_decoder: None,
             distance_decoder: None,
+            dictionary_output: None,
             remaining: length,
             phase: Phase::Command,
         }
@@ -163,15 +179,11 @@ impl CompressedBlock {
                             self.phase = Phase::Done;
                             continue;
                         }
-                        if copy_length > self.remaining {
-                            return Err(CompressedBlockError::MetaBlockOverflow);
-                        }
-
-                        self.phase = if implicit_distance_zero {
-                            self.begin_copy(copy_length, recent_distances.last(), history)?
+                        if implicit_distance_zero {
+                            self.begin_copy(copy_length, recent_distances.last(), history)?;
                         } else {
-                            Phase::Distance { copy_length }
-                        };
+                            self.phase = Phase::Distance { copy_length };
+                        }
                         continue;
                     }
 
@@ -251,11 +263,10 @@ impl CompressedBlock {
                         return Ok(progress(output_cursor, CompressedStatus::NeedInput));
                     };
                     self.distance_decoder = None;
-                    let phase = self.begin_copy(copy_length, distance.value, history)?;
-                    if distance.should_push {
+                    let is_lz77 = self.begin_copy(copy_length, distance.value, history)?;
+                    if distance.should_push && is_lz77 {
                         recent_distances.push(distance.value);
                     }
-                    self.phase = phase;
                 }
                 Phase::Copy {
                     remaining,
@@ -278,6 +289,34 @@ impl CompressedBlock {
                         distance,
                     };
                 }
+                Phase::Dictionary => {
+                    if output_cursor == output.len() {
+                        return Ok(progress(output_cursor, CompressedStatus::NeedOutput));
+                    }
+
+                    let dictionary = self
+                        .dictionary_output
+                        .as_ref()
+                        .expect("dictionary output is initialized before dictionary phase");
+                    let produced = (dictionary.bytes.len() - dictionary.offset)
+                        .min(output.len() - output_cursor);
+                    let end = dictionary.offset + produced;
+                    let bytes = &dictionary.bytes[dictionary.offset..end];
+                    output[output_cursor..output_cursor + produced].copy_from_slice(bytes);
+                    history.push_slice(bytes);
+                    output_cursor += produced;
+                    self.remaining -= produced;
+
+                    let dictionary = self
+                        .dictionary_output
+                        .as_mut()
+                        .expect("dictionary output remains initialized while draining it");
+                    dictionary.offset = end;
+                    if dictionary.offset == dictionary.bytes.len() {
+                        self.dictionary_output = None;
+                        self.phase = Phase::Command;
+                    }
+                }
                 Phase::Done => {
                     return Ok(progress(output_cursor, CompressedStatus::Done));
                 }
@@ -286,21 +325,30 @@ impl CompressedBlock {
     }
 
     fn begin_copy(
-        &self,
+        &mut self,
         copy_length: usize,
         distance: usize,
         history: &History,
-    ) -> Result<Phase, CompressedBlockError> {
-        if distance > history.max_backward_distance() {
-            return Err(CompressedBlockError::DictionaryReference {
-                distance,
-                copy_length,
-            });
+    ) -> Result<bool, CompressedBlockError> {
+        let max_backward_distance = history.max_backward_distance();
+        if distance > max_backward_distance {
+            let bytes = dictionary::transform(distance, copy_length, max_backward_distance)?;
+            if bytes.len() > self.remaining {
+                return Err(CompressedBlockError::MetaBlockOverflow);
+            }
+            self.dictionary_output = Some(DictionaryOutput { bytes, offset: 0 });
+            self.phase = Phase::Dictionary;
+            return Ok(false);
         }
-        Ok(Phase::Copy {
+
+        if copy_length > self.remaining {
+            return Err(CompressedBlockError::MetaBlockOverflow);
+        }
+        self.phase = Phase::Copy {
             remaining: copy_length,
             distance,
-        })
+        };
+        Ok(true)
     }
 }
 
@@ -495,27 +543,28 @@ mod tests {
     }
 
     #[test]
-    fn reports_dictionary_reference_separately() {
-        let mut block = CompressedBlock::new(header(0), trees(0, 0, 0), 2);
+    fn executes_dictionary_reference_without_caching_distance() {
+        let mut block = CompressedBlock::new(header(1), trees(0, 130, 16), 4);
         let mut reader = BitReader::default();
         let mut input_cursor = 0;
-        let mut output = [0; 2];
+        let mut output = [0; 4];
         let mut history = History::new(10);
         let mut recent = RecentDistances::default();
 
-        assert_eq!(
-            block.process(
+        let result = block
+            .process(
                 &mut reader,
                 &[],
                 &mut input_cursor,
                 &mut output,
                 &mut history,
                 &mut recent,
-            ),
-            Err(CompressedBlockError::DictionaryReference {
-                distance: 4,
-                copy_length: 2,
-            })
-        );
+            )
+            .unwrap();
+
+        assert_eq!(result.status, CompressedStatus::Done);
+        assert_eq!(&output, b"time");
+        assert_eq!(recent.last(), 4);
+        assert_eq!(history.previous_bytes(), (b'e', b'm'));
     }
 }
