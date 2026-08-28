@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LiteralContextMode {
+pub(crate) enum LiteralContextMode {
     Lsb6,
     Msb6,
     Utf8,
@@ -7,7 +7,7 @@ pub(super) enum LiteralContextMode {
 }
 
 impl LiteralContextMode {
-    pub(super) fn from_bits(bits: u8) -> Self {
+    pub(crate) fn from_bits(bits: u8) -> Self {
         match bits {
             0 => Self::Lsb6,
             1 => Self::Msb6,
@@ -17,7 +17,7 @@ impl LiteralContextMode {
         }
     }
 
-    pub(super) fn id(self, previous: u8, second_previous: u8) -> u8 {
+    pub(crate) fn id(self, previous: u8, second_previous: u8) -> u8 {
         match self {
             Self::Lsb6 => previous & 0x3f,
             Self::Msb6 => previous >> 2,
@@ -104,11 +104,10 @@ mod tests {
 
     #[test]
     fn signed_mode_uses_seven_magnitude_boundaries() {
-        let mode = LiteralContextMode::Signed;
-        assert_eq!(mode.id(0, 0), 0);
-        assert_eq!(mode.id(1, 16), (1 << 3) | 2);
-        assert_eq!(mode.id(64, 128), (3 << 3) | 4);
-        assert_eq!(mode.id(240, 255), (6 << 3) | 7);
+        assert_eq!(LiteralContextMode::Signed.id(0, 0), 0);
+        assert_eq!(LiteralContextMode::Signed.id(1, 16), (1 << 3) | 2);
+        assert_eq!(LiteralContextMode::Signed.id(64, 128), (3 << 3) | 4);
+        assert_eq!(LiteralContextMode::Signed.id(240, 255), (6 << 3) | 7);
     }
 
     #[test]
