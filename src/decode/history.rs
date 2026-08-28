@@ -271,14 +271,21 @@ mod tests {
 
     #[test]
     fn overlapping_copy_reads_seed_across_ring_boundary() {
-        let bytes = (0..1100_usize).map(|index| index as u8).collect::<Vec<_>>();
+        let bytes = (0..1100_usize)
+            .map(|index| index as u8)
+            .collect::<Vec<_>>();
         let mut history = History::new(10);
         history.push_slice(&bytes);
         let mut output = [0; 64];
         let distance = 100;
 
-        history.copy_into(distance, output.len(), &mut output).unwrap();
-        assert_eq!(&output[..], &bytes[bytes.len() - distance..bytes.len() - distance + 64]);
+        history
+            .copy_into(distance, output.len(), &mut output)
+            .unwrap();
+        assert_eq!(
+            &output[..],
+            &bytes[bytes.len() - distance..bytes.len() - distance + 64]
+        );
     }
 
     #[test]
