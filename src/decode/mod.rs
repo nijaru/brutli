@@ -9,7 +9,7 @@ mod compressed_block;
 mod compressed_header;
 mod compressed_metablock;
 mod compressed_trees;
-mod context;
+pub(crate) mod context;
 mod context_map;
 mod decoder;
 mod dictionary;
