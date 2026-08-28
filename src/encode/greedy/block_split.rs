@@ -1,15 +1,7 @@
 use super::super::bit_writer::BitWriter;
 use super::super::prefix_code::{PrefixEncoding, write_var_len_u8};
 
-const MAX_LITERAL_HISTOGRAMS: usize = 100;
-const LITERAL_BLOCK_SWITCH_COST: f64 = 28.1;
-const LITERAL_STRIDE_LENGTH: usize = 70;
-const SYMBOLS_PER_LITERAL_HISTOGRAM: usize = 544;
-const MIN_LENGTH_FOR_BLOCK_SPLITTING: usize = 128;
-const ITER_MUL_FOR_REFINING: usize = 2;
-const MIN_ITERS_FOR_REFINING: usize = 100;
-const FIND_BLOCKS_ITERS_Q5: usize = 3;
-const LITERAL_ALPHABET_SIZE: usize = 256;
+const MAX_BLOCK_TYPES: usize = 256;
 const BLOCK_LENGTH_ALPHABET_SIZE: usize = 26;
 
 const BLOCK_LENGTH_OFFSETS: [usize; BLOCK_LENGTH_ALPHABET_SIZE] = [
@@ -20,18 +12,22 @@ const BLOCK_LENGTH_EXTRA_BITS: [u8; BLOCK_LENGTH_ALPHABET_SIZE] = [
     2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13, 24,
 ];
 
-type LiteralHistogram = [usize; LITERAL_ALPHABET_SIZE];
-
 #[derive(Debug, Clone)]
-pub(super) struct LiteralSplit {
+pub(super) struct BlockSplit {
     types: Vec<u8>,
     lengths: Vec<usize>,
     num_types: usize,
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct SplitResult {
+    pub(super) split: BlockSplit,
+    pub(super) histograms: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct BlockSplitEncoding {
-    split: LiteralSplit,
+    split: BlockSplit,
     type_code: Option<PrefixEncoding>,
     length_code: Option<PrefixEncoding>,
 }
@@ -57,36 +53,24 @@ struct BlockTypeCodeCalculator {
     second_last_type: usize,
 }
 
-impl LiteralSplit {
-    fn single(length: usize) -> Self {
-        Self {
-            types: vec![0],
-            lengths: vec![length],
-            num_types: 1,
-        }
-    }
-
-    pub(super) const fn num_types(&self) -> usize {
-        self.num_types
-    }
-
-    pub(super) fn histograms(&self, data: &[u8]) -> Vec<LiteralHistogram> {
-        let mut histograms = vec![[0_usize; LITERAL_ALPHABET_SIZE]; self.num_types];
-        let mut offset = 0_usize;
-        for (&block_type, &length) in self.types.iter().zip(&self.lengths) {
-            let end = offset + length;
-            for &symbol in &data[offset..end] {
-                histograms[usize::from(block_type)][usize::from(symbol)] += 1;
-            }
-            offset = end;
-        }
-        debug_assert_eq!(offset, data.len());
-        histograms
-    }
+#[derive(Debug)]
+struct GreedyBlockSplitter {
+    alphabet_size: usize,
+    min_block_size: usize,
+    split_threshold: f64,
+    max_block_types: usize,
+    split: BlockSplit,
+    histograms: Vec<Vec<usize>>,
+    target_block_size: usize,
+    block_size: usize,
+    current_histogram: usize,
+    last_histograms: [usize; 2],
+    last_entropy: [f64; 2],
+    merge_last_count: usize,
 }
 
 impl BlockSplitEncoding {
-    pub(super) fn new(split: LiteralSplit) -> Option<Self> {
+    pub(super) fn new(split: BlockSplit) -> Option<Self> {
         if split.num_types == 1 {
             return Some(Self {
                 split,
@@ -120,7 +104,7 @@ impl BlockSplitEncoding {
     pub(super) fn write_header(&self, writer: &mut BitWriter) {
         write_var_len_u8(
             writer,
-            u8::try_from(self.split.num_types - 1).expect("literal block type count fits in u8"),
+            u8::try_from(self.split.num_types - 1).expect("block type count fits in u8"),
         );
         if self.split.num_types == 1 {
             return;
@@ -209,31 +193,163 @@ impl BlockTypeCodeCalculator {
     }
 }
 
-pub(super) fn split_literals(data: &[u8]) -> LiteralSplit {
-    if data.len() < MIN_LENGTH_FOR_BLOCK_SPLITTING {
-        return LiteralSplit::single(data.len());
-    }
-
-    let mut num_histograms =
-        (data.len() / SYMBOLS_PER_LITERAL_HISTOGRAM + 1).min(MAX_LITERAL_HISTOGRAMS);
-    if num_histograms == 1 {
-        return LiteralSplit::single(data.len());
-    }
-
-    let mut histograms = initial_entropy_codes(data, num_histograms);
-    refine_entropy_codes(data, &mut histograms);
-    let mut block_ids = vec![0_u8; data.len()];
-
-    for _ in 0..FIND_BLOCKS_ITERS_Q5 {
-        find_blocks(data, LITERAL_BLOCK_SWITCH_COST, &histograms, &mut block_ids);
-        num_histograms = remap_block_ids(&mut block_ids, num_histograms);
-        if num_histograms == 1 {
-            return LiteralSplit::single(data.len());
+impl GreedyBlockSplitter {
+    fn new(
+        alphabet_size: usize,
+        min_block_size: usize,
+        split_threshold: f64,
+        num_symbols: usize,
+    ) -> Self {
+        let max_num_blocks = num_symbols / min_block_size + 1;
+        let max_num_types = max_num_blocks.min(MAX_BLOCK_TYPES + 1);
+        Self {
+            alphabet_size,
+            min_block_size,
+            split_threshold,
+            max_block_types: MAX_BLOCK_TYPES,
+            split: BlockSplit {
+                types: Vec::with_capacity(max_num_blocks),
+                lengths: Vec::with_capacity(max_num_blocks),
+                num_types: 0,
+            },
+            histograms: vec![vec![0_usize; alphabet_size]; max_num_types],
+            target_block_size: min_block_size,
+            block_size: 0,
+            current_histogram: 0,
+            last_histograms: [0, 0],
+            last_entropy: [0.0, 0.0],
+            merge_last_count: 0,
         }
-        histograms = build_histograms(data, &block_ids, num_histograms);
     }
 
-    split_from_assignments(&block_ids, num_histograms)
+    fn add_symbol(&mut self, symbol: usize) {
+        self.histograms[self.current_histogram][symbol] += 1;
+        self.block_size += 1;
+        if self.block_size == self.target_block_size {
+            self.finish_block(false);
+        }
+    }
+
+    fn finish(mut self) -> SplitResult {
+        self.finish_block(true);
+        self.histograms.truncate(self.split.num_types);
+        SplitResult {
+            split: self.split,
+            histograms: self.histograms,
+        }
+    }
+
+    fn finish_block(&mut self, is_final: bool) {
+        self.block_size = self.block_size.max(self.min_block_size);
+        if self.split.types.is_empty() {
+            self.split.types.push(0);
+            self.split.lengths.push(self.block_size);
+            let entropy = bits_entropy(&self.histograms[0][..self.alphabet_size]);
+            self.last_entropy = [entropy, entropy];
+            self.split.num_types = 1;
+            self.current_histogram += 1;
+            self.clear_current_histogram();
+            self.block_size = 0;
+        } else if self.block_size > 0 {
+            let current = self.current_histogram;
+            let entropy = bits_entropy(&self.histograms[current][..self.alphabet_size]);
+            let mut combined = [Vec::new(), Vec::new()];
+            let mut combined_entropy = [0.0_f64; 2];
+            let mut difference = [0.0_f64; 2];
+
+            for index in 0..2 {
+                combined[index] = add_histograms(
+                    &self.histograms[current],
+                    &self.histograms[self.last_histograms[index]],
+                );
+                combined_entropy[index] = bits_entropy(&combined[index][..self.alphabet_size]);
+                difference[index] = combined_entropy[index] - entropy - self.last_entropy[index];
+            }
+
+            if self.split.num_types < self.max_block_types
+                && difference[0] > self.split_threshold
+                && difference[1] > self.split_threshold
+            {
+                self.split.types.push(self.split.num_types as u8);
+                self.split.lengths.push(self.block_size);
+                self.last_histograms[1] = self.last_histograms[0];
+                self.last_histograms[0] = self.split.num_types;
+                self.last_entropy[1] = self.last_entropy[0];
+                self.last_entropy[0] = entropy;
+                self.split.num_types += 1;
+                self.current_histogram += 1;
+                self.clear_current_histogram();
+                self.reset_after_split();
+            } else if difference[1] < difference[0] - 20.0 {
+                let second_last_type = self.split.types[self.split.types.len() - 2];
+                self.split.types.push(second_last_type);
+                self.split.lengths.push(self.block_size);
+                self.last_histograms.swap(0, 1);
+                self.histograms[self.last_histograms[0]] = combined[1].clone();
+                self.last_entropy[1] = self.last_entropy[0];
+                self.last_entropy[0] = combined_entropy[1];
+                self.clear_current_histogram();
+                self.reset_after_split();
+            } else {
+                *self
+                    .split
+                    .lengths
+                    .last_mut()
+                    .expect("greedy splitter has a previous block") += self.block_size;
+                self.histograms[self.last_histograms[0]] = combined[0].clone();
+                self.last_entropy[0] = combined_entropy[0];
+                if self.split.num_types == 1 {
+                    self.last_entropy[1] = self.last_entropy[0];
+                }
+                self.block_size = 0;
+                self.clear_current_histogram();
+                self.merge_last_count += 1;
+                if self.merge_last_count > 1 {
+                    self.target_block_size += self.min_block_size;
+                }
+            }
+        }
+
+        if is_final {
+            debug_assert_eq!(self.split.types.len(), self.split.lengths.len());
+        }
+    }
+
+    fn clear_current_histogram(&mut self) {
+        if let Some(histogram) = self.histograms.get_mut(self.current_histogram) {
+            histogram.fill(0);
+        }
+    }
+
+    fn reset_after_split(&mut self) {
+        self.block_size = 0;
+        self.merge_last_count = 0;
+        self.target_block_size = self.min_block_size;
+    }
+}
+
+pub(super) fn split_literals(data: &[u8]) -> SplitResult {
+    let mut splitter = GreedyBlockSplitter::new(256, 512, 400.0, data.len());
+    for &symbol in data {
+        splitter.add_symbol(usize::from(symbol));
+    }
+    splitter.finish()
+}
+
+pub(super) fn split_commands(data: &[u16]) -> SplitResult {
+    let mut splitter = GreedyBlockSplitter::new(704, 1024, 500.0, data.len());
+    for &symbol in data {
+        splitter.add_symbol(usize::from(symbol));
+    }
+    splitter.finish()
+}
+
+pub(super) fn split_distances(data: &[u16], alphabet_size: usize) -> SplitResult {
+    let mut splitter = GreedyBlockSplitter::new(alphabet_size, 512, 100.0, data.len());
+    for &symbol in data {
+        splitter.add_symbol(usize::from(symbol));
+    }
+    splitter.finish()
 }
 
 pub(super) fn write_trivial_context_map(
@@ -257,8 +373,8 @@ pub(super) fn write_trivial_context_map(
     }
     let code = PrefixEncoding::from_frequencies(&frequencies)?;
 
-    writer.write_bits(1, 1); // use RLE for zero runs
-    writer.write_bits(u64::try_from(repeat_code - 1).ok()?, 4); // RLEMAX - 1
+    writer.write_bits(1, 1);
+    writer.write_bits(u64::try_from(repeat_code - 1).ok()?, 4);
     code.write_tree(writer, u16::try_from(alphabet_size).ok()?);
     for block_type in 0..num_types {
         let symbol = if block_type == 0 {
@@ -273,187 +389,35 @@ pub(super) fn write_trivial_context_map(
             u8::try_from(repeat_code).ok()?,
         );
     }
-    writer.write_bits(1, 1); // inverse move-to-front
+    writer.write_bits(1, 1);
     Some(())
 }
 
-fn initial_entropy_codes(data: &[u8], num_histograms: usize) -> Vec<LiteralHistogram> {
-    let mut histograms = vec![[0_usize; LITERAL_ALPHABET_SIZE]; num_histograms];
-    let mut seed = 7_u32;
-    let block_length = data.len() / num_histograms;
-    for (index, histogram) in histograms.iter_mut().enumerate() {
-        let mut position = data.len() * index / num_histograms;
-        if index != 0 {
-            position += my_rand(&mut seed) as usize % block_length;
-        }
-        if position + LITERAL_STRIDE_LENGTH >= data.len() {
-            position = data.len() - LITERAL_STRIDE_LENGTH - 1;
-        }
-        add_vector(histogram, &data[position..position + LITERAL_STRIDE_LENGTH]);
+fn bits_entropy(histogram: &[usize]) -> f64 {
+    let total = histogram.iter().sum::<usize>();
+    if total == 0 {
+        return 0.0;
     }
-    histograms
+    let total_log = fast_log2(total);
+    let mut entropy = 0.0_f64;
+    for &count in histogram {
+        if count != 0 {
+            entropy += count as f64 * (total_log - fast_log2(count));
+        }
+    }
+    entropy.max(total as f64)
 }
 
-fn refine_entropy_codes(data: &[u8], histograms: &mut [LiteralHistogram]) {
-    let num_histograms = histograms.len();
-    let mut iterations =
-        ITER_MUL_FOR_REFINING * data.len() / LITERAL_STRIDE_LENGTH + MIN_ITERS_FOR_REFINING;
-    iterations = iterations.div_ceil(num_histograms) * num_histograms;
-    let mut seed = 7_u32;
-
-    for iteration in 0..iterations {
-        let mut sample = [0_usize; LITERAL_ALPHABET_SIZE];
-        random_sample(&mut seed, data, LITERAL_STRIDE_LENGTH, &mut sample);
-        add_histogram(&mut histograms[iteration % num_histograms], &sample);
-    }
-}
-
-fn random_sample(seed: &mut u32, data: &[u8], mut stride: usize, histogram: &mut LiteralHistogram) {
-    let position = if stride >= data.len() {
-        stride = data.len();
-        0
+fn fast_log2(value: usize) -> f64 {
+    if value == 0 {
+        0.0
     } else {
-        my_rand(seed) as usize % (data.len() - stride + 1)
-    };
-    add_vector(histogram, &data[position..position + stride]);
-}
-
-fn find_blocks(
-    data: &[u8],
-    block_switch_bitcost: f64,
-    histograms: &[LiteralHistogram],
-    block_ids: &mut [u8],
-) -> usize {
-    let num_histograms = histograms.len();
-    if num_histograms <= 1 {
-        block_ids.fill(0);
-        return 1;
-    }
-
-    let mut insert_cost = vec![0.0_f64; LITERAL_ALPHABET_SIZE * num_histograms];
-    for (histogram_index, histogram) in histograms.iter().enumerate() {
-        let total = histogram.iter().sum::<usize>();
-        let total_cost = (total as f64).log2();
-        for (symbol, &count) in histogram.iter().enumerate() {
-            let bit_cost = if count == 0 {
-                -2.0
-            } else {
-                (count as f64).log2()
-            };
-            insert_cost[symbol * num_histograms + histogram_index] = total_cost - bit_cost;
-        }
-    }
-
-    let bitmap_length = num_histograms.div_ceil(8);
-    let mut costs = vec![0.0_f64; num_histograms];
-    let mut switch_signal = vec![0_u8; data.len() * bitmap_length];
-
-    for (position, &symbol) in data.iter().enumerate() {
-        let insert_offset = usize::from(symbol) * num_histograms;
-        let mut minimum_cost = f64::INFINITY;
-        for (histogram_index, cost) in costs.iter_mut().enumerate() {
-            *cost += insert_cost[insert_offset + histogram_index];
-            if *cost < minimum_cost {
-                minimum_cost = *cost;
-                block_ids[position] = histogram_index as u8;
-            }
-        }
-
-        let mut switch_cost = block_switch_bitcost;
-        if position < 2000 {
-            switch_cost *= 0.77 + (0.07 / 2000.0) * position as f64;
-        }
-        let signal_offset = position * bitmap_length;
-        for (histogram_index, cost) in costs.iter_mut().enumerate() {
-            *cost -= minimum_cost;
-            if *cost >= switch_cost {
-                *cost = switch_cost;
-                switch_signal[signal_offset + histogram_index / 8] |= 1_u8 << (histogram_index & 7);
-            }
-        }
-    }
-
-    let mut num_blocks = 1_usize;
-    let mut position = data.len() - 1;
-    let mut current_id = block_ids[position];
-    while position > 0 {
-        position -= 1;
-        let mask = 1_u8 << (current_id & 7);
-        let signal = switch_signal[position * bitmap_length + usize::from(current_id >> 3)];
-        if signal & mask != 0 && current_id != block_ids[position] {
-            current_id = block_ids[position];
-            num_blocks += 1;
-        }
-        block_ids[position] = current_id;
-    }
-    num_blocks
-}
-
-fn remap_block_ids(block_ids: &mut [u8], num_histograms: usize) -> usize {
-    let mut new_ids = vec![u16::MAX; num_histograms];
-    let mut next_id = 0_u16;
-    for &block_id in block_ids.iter() {
-        let slot = &mut new_ids[usize::from(block_id)];
-        if *slot == u16::MAX {
-            *slot = next_id;
-            next_id += 1;
-        }
-    }
-    for block_id in block_ids {
-        *block_id = u8::try_from(new_ids[usize::from(*block_id)])
-            .expect("literal histogram count fits in u8");
-    }
-    usize::from(next_id)
-}
-
-fn build_histograms(data: &[u8], block_ids: &[u8], num_histograms: usize) -> Vec<LiteralHistogram> {
-    let mut histograms = vec![[0_usize; LITERAL_ALPHABET_SIZE]; num_histograms];
-    for (&symbol, &block_id) in data.iter().zip(block_ids) {
-        histograms[usize::from(block_id)][usize::from(symbol)] += 1;
-    }
-    histograms
-}
-
-fn split_from_assignments(block_ids: &[u8], num_types: usize) -> LiteralSplit {
-    debug_assert!(!block_ids.is_empty());
-    let mut types = Vec::new();
-    let mut lengths = Vec::new();
-    let mut current_type = block_ids[0];
-    let mut current_length = 1_usize;
-    for &block_type in &block_ids[1..] {
-        if block_type == current_type {
-            current_length += 1;
-        } else {
-            types.push(current_type);
-            lengths.push(current_length);
-            current_type = block_type;
-            current_length = 1;
-        }
-    }
-    types.push(current_type);
-    lengths.push(current_length);
-    LiteralSplit {
-        types,
-        lengths,
-        num_types,
+        (value as f64).log2()
     }
 }
 
-fn add_vector(histogram: &mut LiteralHistogram, data: &[u8]) {
-    for &symbol in data {
-        histogram[usize::from(symbol)] += 1;
-    }
-}
-
-fn add_histogram(destination: &mut LiteralHistogram, source: &LiteralHistogram) {
-    for (destination, &source) in destination.iter_mut().zip(source) {
-        *destination += source;
-    }
-}
-
-fn my_rand(seed: &mut u32) -> u32 {
-    *seed = seed.wrapping_mul(16807);
-    *seed
+fn add_histograms(left: &[usize], right: &[usize]) -> Vec<usize> {
+    left.iter().zip(right).map(|(&a, &b)| a + b).collect()
 }
 
 fn block_length_code(length: usize) -> BlockLengthCode {
@@ -479,25 +443,24 @@ fn write_block_length(writer: &mut BitWriter, code: &PrefixEncoding, length: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockTypeCodeCalculator, LiteralSplit, block_length_code, split_literals};
+    use super::{BlockSplitEncoding, BlockTypeCodeCalculator, block_length_code, split_literals};
 
     #[test]
-    fn short_literal_stream_uses_one_type() {
-        let split = split_literals(&[b'a'; 127]);
-        assert_eq!(split.num_types(), 1);
-        assert_eq!(split.lengths, [127]);
+    fn greedy_splitter_keeps_uniform_literals_together() {
+        let result = split_literals(&[b'a'; 4096]);
+        assert_eq!(result.split.num_types, 1);
+        assert_eq!(result.histograms.len(), 1);
+        assert_eq!(result.histograms[0][usize::from(b'a')], 4096);
     }
 
     #[test]
-    fn q5_splitter_separates_different_literal_regions() {
+    fn greedy_splitter_separates_different_literal_regions() {
         let mut data = vec![b'a'; 4096];
         data.resize(8192, b'z');
-        let split = split_literals(&data);
-        assert!(split.num_types() >= 2);
-        assert_eq!(split.lengths.iter().sum::<usize>(), data.len());
-        assert_eq!(split.types.len(), split.lengths.len());
-        let histograms = split.histograms(&data);
-        assert_eq!(histograms.len(), split.num_types());
+        let result = split_literals(&data);
+        assert!(result.split.num_types >= 2);
+        assert!(result.split.lengths.iter().sum::<usize>() >= data.len());
+        assert_eq!(result.split.types.len(), result.split.lengths.len());
     }
 
     #[test]
@@ -522,15 +485,9 @@ mod tests {
     }
 
     #[test]
-    fn split_histograms_follow_block_types() {
-        let split = LiteralSplit {
-            types: vec![0, 1, 0],
-            lengths: vec![2, 2, 1],
-            num_types: 2,
-        };
-        let histograms = split.histograms(b"aabbc");
-        assert_eq!(histograms[0][usize::from(b'a')], 2);
-        assert_eq!(histograms[0][usize::from(b'c')], 1);
-        assert_eq!(histograms[1][usize::from(b'b')], 2);
+    fn split_encoding_accepts_single_type() {
+        let result = split_literals(&[b'a'; 1024]);
+        let encoding = BlockSplitEncoding::new(result.split).unwrap();
+        assert_eq!(encoding.num_types(), 1);
     }
 }
