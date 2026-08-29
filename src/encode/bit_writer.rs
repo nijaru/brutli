@@ -121,7 +121,13 @@ mod tests {
         writer.write_bits(u64::MAX, 64);
         writer.write_bits(0b101, 3);
 
-        assert_eq!(writer.finish(), vec![0xff; 8].into_iter().chain([0x05]).collect::<Vec<_>>());
+        assert_eq!(
+            writer.finish(),
+            vec![0xff; 8]
+                .into_iter()
+                .chain([0x05])
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
