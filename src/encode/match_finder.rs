@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use super::distance::RecentDistances;
 use super::static_dictionary::DictionarySearch;
 
@@ -58,7 +60,7 @@ impl SearchResult {
 #[derive(Debug)]
 struct QualityFiveHasher {
     counts: Vec<u16>,
-    buckets: Vec<u32>,
+    buckets: Box<[MaybeUninit<u32>]>,
     dictionary: DictionarySearch,
 }
 
@@ -66,7 +68,7 @@ impl QualityFiveHasher {
     fn new() -> Self {
         Self {
             counts: vec![0; BUCKET_COUNT],
-            buckets: vec![0; BUCKET_COUNT * BLOCK_SIZE],
+            buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             dictionary: DictionarySearch::default(),
         }
     }
@@ -75,7 +77,7 @@ impl QualityFiveHasher {
         let key = hash4(input, position);
         let count = usize::from(self.counts[key]);
         let offset = (key << BLOCK_BITS) + (count & BLOCK_MASK);
-        self.buckets[offset] = position as u32;
+        self.buckets[offset].write(position as u32);
         self.counts[key] = self.counts[key].wrapping_add(1);
     }
 
@@ -83,6 +85,14 @@ impl QualityFiveHasher {
         for position in start..end {
             self.store(input, position);
         }
+    }
+
+    fn bucket_position(&self, offset: usize) -> usize {
+        // SAFETY: a bucket slot is read only for indices below `counts[key]`.
+        // Each count increment follows a write to the corresponding ring slot,
+        // so every reachable slot has been initialized. If the u16 count wraps,
+        // all ring slots have necessarily been written many times already.
+        unsafe { *self.buckets[offset].assume_init_ref() as usize }
     }
 
     fn find_longest_match(
@@ -138,7 +148,7 @@ impl QualityFiveHasher {
 
         let oldest = count.saturating_sub(BLOCK_SIZE);
         for index in (oldest..count).rev() {
-            let previous = self.buckets[bucket_start + (index & BLOCK_MASK)] as usize;
+            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
             debug_assert!(previous < position);
             let backward = position - previous;
             if backward > max_backward {
@@ -171,7 +181,7 @@ impl QualityFiveHasher {
         }
 
         let offset = bucket_start + (count & BLOCK_MASK);
-        self.buckets[offset] = position as u32;
+        self.buckets[offset].write(position as u32);
         self.counts[key] = self.counts[key].wrapping_add(1);
 
         if result.score == MIN_SCORE
@@ -389,7 +399,9 @@ mod tests {
 
         let key = hash4(&input, 0);
         let start = key << BLOCK_BITS;
-        let mut positions = hasher.buckets[start..start + BLOCK_SIZE].to_vec();
+        let mut positions = (0..BLOCK_SIZE)
+            .map(|offset| hasher.bucket_position(start + offset) as u32)
+            .collect::<Vec<_>>();
         positions.sort_unstable();
         assert_eq!(positions, (4_u32..20).collect::<Vec<_>>());
     }
