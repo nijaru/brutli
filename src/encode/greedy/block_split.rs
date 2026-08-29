@@ -229,8 +229,6 @@ impl GreedyBlockSplitter {
         let max_num_blocks = num_symbols / min_block_size + 1;
         let max_num_types = max_num_blocks.min(max_block_types + 1);
         let histogram_size = symbol_alphabet_size * context_count;
-        let mut histograms = Vec::with_capacity(max_num_types);
-        histograms.push(vec![0_usize; histogram_size]);
         Self {
             symbol_alphabet_size,
             context_count,
@@ -242,7 +240,7 @@ impl GreedyBlockSplitter {
                 lengths: Vec::with_capacity(max_num_blocks),
                 num_types: 0,
             },
-            histograms,
+            histograms: vec![vec![0_usize; histogram_size]; max_num_types],
             target_block_size: min_block_size,
             block_size: 0,
             current_histogram: 0,
@@ -294,7 +292,8 @@ impl GreedyBlockSplitter {
             let entropy = self.histogram_entropy(&self.histograms[0]);
             self.last_entropy = [entropy, entropy];
             self.split.num_types = 1;
-            self.advance_current_histogram();
+            self.current_histogram += 1;
+            self.clear_current_histogram();
             self.block_size = 0;
         } else if self.block_size > 0 {
             let current = self.current_histogram;
@@ -319,7 +318,8 @@ impl GreedyBlockSplitter {
                 self.last_entropy[1] = self.last_entropy[0];
                 self.last_entropy[0] = entropy;
                 self.split.num_types += 1;
-                self.advance_current_histogram();
+                self.current_histogram += 1;
+                self.clear_current_histogram();
                 self.reset_after_split();
             } else if difference[1] < difference[0] - 20.0 {
                 let second_last_type = self.split.types[self.split.types.len() - 2];
@@ -371,13 +371,6 @@ impl GreedyBlockSplitter {
             .zip(self.histograms[right].chunks_exact(self.symbol_alphabet_size))
             .map(|(left, right)| combined_bits_entropy(left, right))
             .sum()
-    }
-
-    fn advance_current_histogram(&mut self) {
-        self.current_histogram += 1;
-        debug_assert_eq!(self.current_histogram, self.histograms.len());
-        self.histograms
-            .push(vec![0_usize; self.symbol_alphabet_size * self.context_count]);
     }
 
     fn clear_current_histogram(&mut self) {
