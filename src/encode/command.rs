@@ -47,6 +47,10 @@ impl InsertCommand {
         }
     }
 
+    pub(super) const fn extra_bit_count(self) -> u8 {
+        self.insert.extra_bits + self.copy.extra_bits
+    }
+
     pub(super) fn write_extra(self, writer: &mut BitWriter) {
         write_length_extra(writer, self.insert);
         write_length_extra(writer, self.copy);
@@ -77,7 +81,6 @@ impl ExplicitCommand {
         self.symbol >= 128
     }
 
-    #[cfg(test)]
     pub(super) const fn extra_bit_count(self) -> u8 {
         self.insert.extra_bits + self.copy.extra_bits
     }
