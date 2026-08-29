@@ -33,10 +33,6 @@ pub(super) struct Histograms {
 }
 
 impl Histograms {
-    pub(super) fn len(&self) -> usize {
-        self.data.len() / self.width
-    }
-
     pub(super) fn iter(&self) -> std::slice::ChunksExact<'_, usize> {
         self.data.chunks_exact(self.width)
     }
@@ -713,7 +709,7 @@ mod tests {
     fn greedy_splitter_keeps_uniform_literals_together() {
         let result = split_literals(&[b'a'; 4096]);
         assert_eq!(result.split.num_types, 1);
-        assert_eq!(result.histograms.len(), 1);
+        assert_eq!(result.histograms.iter().len(), 1);
         assert_eq!(
             result.histograms.iter().next().unwrap()[usize::from(b'a')],
             4096
@@ -737,7 +733,7 @@ mod tests {
             .map(|index| (b'a' + (index & 1) as u8, (index & 1) as u8))
             .collect::<Vec<_>>();
         let result = split_contextual_literals(&data, 2);
-        assert_eq!(result.histograms.len(), result.split.num_types * 2);
+        assert_eq!(result.histograms.iter().len(), result.split.num_types * 2);
         assert_eq!(
             result.histograms.iter().flatten().sum::<usize>(),
             data.len()
