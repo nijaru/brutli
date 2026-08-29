@@ -355,12 +355,7 @@ impl GreedyBlockSplitter {
                 let target = self.last_histograms[1];
                 self.split.types.push(second_last_type);
                 self.split.lengths.push(self.block_size);
-                merge_histograms(
-                    &mut self.histograms,
-                    self.histogram_size,
-                    current,
-                    target,
-                );
+                merge_histograms(&mut self.histograms, self.histogram_size, current, target);
                 self.last_histograms.swap(0, 1);
                 self.last_entropy[1] = self.last_entropy[0];
                 self.last_entropy[0] = combined_entropy[1];
@@ -373,12 +368,7 @@ impl GreedyBlockSplitter {
                     .last_mut()
                     .expect("greedy splitter has a previous block") += self.block_size;
                 let target = self.last_histograms[0];
-                merge_histograms(
-                    &mut self.histograms,
-                    self.histogram_size,
-                    current,
-                    target,
-                );
+                merge_histograms(&mut self.histograms, self.histogram_size, current, target);
                 self.last_entropy[0] = combined_entropy[0];
                 if self.split.num_types == 1 {
                     self.last_entropy[1] = self.last_entropy[0];
@@ -660,12 +650,7 @@ fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
     entropy.max(total as f64)
 }
 
-fn merge_histograms(
-    histograms: &mut [usize],
-    histogram_size: usize,
-    source: usize,
-    target: usize,
-) {
+fn merge_histograms(histograms: &mut [usize], histogram_size: usize, source: usize, target: usize) {
     debug_assert_ne!(source, target);
     let source_start = source * histogram_size;
     let target_start = target * histogram_size;
@@ -729,7 +714,10 @@ mod tests {
         let result = split_literals(&[b'a'; 4096]);
         assert_eq!(result.split.num_types, 1);
         assert_eq!(result.histograms.len(), 1);
-        assert_eq!(result.histograms.iter().next().unwrap()[usize::from(b'a')], 4096);
+        assert_eq!(
+            result.histograms.iter().next().unwrap()[usize::from(b'a')],
+            4096
+        );
     }
 
     #[test]
