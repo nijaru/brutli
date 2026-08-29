@@ -4,6 +4,11 @@ use std::sync::LazyLock;
 
 use divan::counter::BytesCount;
 
+#[cfg(feature = "current-google-reference")]
+const GOOGLE_REFERENCE: &str = "google/brotli@2ff28fb62deeb8c49720acf2c16ecc8f6f7408f1";
+#[cfg(not(feature = "current-google-reference"))]
+const GOOGLE_REFERENCE: &str = "brotli-sys 0.3.2 (legacy bundled C reference)";
+
 struct Case {
     source: Vec<u8>,
 }
@@ -54,6 +59,7 @@ static BINARY: LazyLock<Case> = LazyLock::new(|| {
 });
 
 fn main() {
+    println!("google reference: {GOOGLE_REFERENCE}");
     print_ratio("text", &TEXT);
     print_ratio("repetitive", &REPETITIVE);
     print_ratio("html", &HTML);
@@ -172,6 +178,7 @@ fn rust_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
     compressed
 }
 
+#[cfg(not(feature = "current-google-reference"))]
 fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
     let quality = i32::try_from(quality).expect("Brotli quality fits c_int");
     let capacity = unsafe {
@@ -197,6 +204,57 @@ fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
     assert_ne!(result, 0, "Google Brotli encoder failed");
     compressed.truncate(compressed_size);
     compressed
+}
+
+#[cfg(feature = "current-google-reference")]
+fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
+    current_google::compress(source, quality)
+}
+
+#[cfg(feature = "current-google-reference")]
+mod current_google {
+    #[link(name = "brotlienc", kind = "static")]
+    #[link(name = "brotlicommon", kind = "static")]
+    #[link(name = "m")]
+    unsafe extern "C" {
+        fn BrotliEncoderMaxCompressedSize(input_size: usize) -> usize;
+        fn BrotliEncoderCompress(
+            quality: i32,
+            lgwin: i32,
+            mode: i32,
+            input_size: usize,
+            input_buffer: *const u8,
+            encoded_size: *mut usize,
+            encoded_buffer: *mut u8,
+        ) -> i32;
+    }
+
+    pub(super) fn compress(source: &[u8], quality: u32) -> Vec<u8> {
+        let quality = i32::try_from(quality).expect("Brotli quality fits c_int");
+        let capacity = unsafe {
+            // SAFETY: The function only computes an upper bound from the supplied size.
+            BrotliEncoderMaxCompressedSize(source.len())
+        };
+        let mut compressed = vec![0_u8; capacity];
+        let mut compressed_size = capacity;
+        let result = unsafe {
+            // SAFETY: The input pointer is valid for `source.len()` bytes. The output
+            // pointer is valid for `capacity` bytes and `compressed_size` supplies
+            // that capacity to the pinned Google Brotli encoder.
+            BrotliEncoderCompress(
+                quality,
+                22,
+                0,
+                source.len(),
+                source.as_ptr(),
+                &mut compressed_size,
+                compressed.as_mut_ptr(),
+            )
+        };
+        assert_ne!(result, 0, "pinned Google Brotli encoder failed");
+        compressed.truncate(compressed_size);
+        compressed
+    }
 }
 
 fn bench_brutli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
