@@ -284,16 +284,19 @@ impl GreedyBlockSplitter {
     pub(super) fn finish(mut self) -> SplitResult {
         self.finish_block(true);
         self.histograms.truncate(self.split.num_types);
-        let histograms = self
-            .histograms
-            .into_iter()
-            .flat_map(|histogram| {
-                histogram
-                    .chunks_exact(self.symbol_alphabet_size)
-                    .map(<[usize]>::to_vec)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let histograms = if self.context_count == 1 {
+            self.histograms
+        } else {
+            self.histograms
+                .into_iter()
+                .flat_map(|histogram| {
+                    histogram
+                        .chunks_exact(self.symbol_alphabet_size)
+                        .map(<[usize]>::to_vec)
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
         SplitResult {
             split: self.split,
             histograms,
