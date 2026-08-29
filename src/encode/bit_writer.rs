@@ -1,3 +1,5 @@
+const REVERSED_BYTES: [u8; 256] = reversed_bytes();
+
 #[derive(Debug, Default)]
 pub(super) struct BitWriter {
     bytes: Vec<u8>,
@@ -44,8 +46,9 @@ impl BitWriter {
             return;
         }
         debug_assert!(count <= u16::BITS as u8);
-        let reversed = code.reverse_bits() >> (u16::BITS as u8 - count);
-        self.write_bits(u64::from(reversed), count);
+        let reversed = (u16::from(REVERSED_BYTES[usize::from(code as u8)]) << 8)
+            | u16::from(REVERSED_BYTES[usize::from((code >> 8) as u8)]);
+        self.write_bits(u64::from(reversed >> (u16::BITS as u8 - count)), count);
     }
 
     pub(super) fn bit_len(&self) -> usize {
@@ -79,9 +82,27 @@ const fn low_mask(bits: u8) -> u64 {
     }
 }
 
+const fn reversed_bytes() -> [u8; 256] {
+    let mut table = [0_u8; 256];
+    let mut value = 0_usize;
+    while value < table.len() {
+        let mut source = value as u8;
+        let mut reversed = 0_u8;
+        let mut bit = 0;
+        while bit < 8 {
+            reversed = (reversed << 1) | (source & 1);
+            source >>= 1;
+            bit += 1;
+        }
+        table[value] = reversed;
+        value += 1;
+    }
+    table
+}
+
 #[cfg(test)]
 mod tests {
-    use super::BitWriter;
+    use super::{BitWriter, REVERSED_BYTES};
 
     #[test]
     fn packs_integer_bits_lsb_first() {
@@ -100,6 +121,13 @@ mod tests {
         writer.write_prefix(0b01, 2);
 
         assert_eq!(writer.finish(), vec![0b0001_0011]);
+    }
+
+    #[test]
+    fn reverse_table_matches_builtin() {
+        for byte in 0..=u8::MAX {
+            assert_eq!(REVERSED_BYTES[usize::from(byte)], byte.reverse_bits());
+        }
     }
 
     #[test]
