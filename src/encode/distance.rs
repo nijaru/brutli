@@ -150,7 +150,6 @@ impl DistanceCode {
         panic!("distance exceeds the RFC 7932 window range");
     }
 
-    #[cfg(test)]
     pub(super) const fn extra_bit_count(self) -> u8 {
         self.extra_bits
     }
