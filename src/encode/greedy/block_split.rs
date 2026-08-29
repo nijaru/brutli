@@ -402,6 +402,7 @@ impl GreedyBlockSplitter {
     }
 }
 
+#[cfg(test)]
 pub(super) fn split_literals(data: &[u8]) -> SplitResult {
     let mut splitter = GreedyBlockSplitter::literals(data.len());
     for &symbol in data {
@@ -410,6 +411,7 @@ pub(super) fn split_literals(data: &[u8]) -> SplitResult {
     splitter.finish()
 }
 
+#[cfg(test)]
 pub(super) fn split_contextual_literals(data: &[(u8, u8)], context_count: usize) -> SplitResult {
     let mut splitter = GreedyBlockSplitter::contextual_literals(context_count, data.len());
     for &(symbol, context) in data {
@@ -418,6 +420,7 @@ pub(super) fn split_contextual_literals(data: &[(u8, u8)], context_count: usize)
     splitter.finish()
 }
 
+#[cfg(test)]
 pub(super) fn split_commands(data: &[u16]) -> SplitResult {
     let mut splitter = GreedyBlockSplitter::commands(data.len());
     for &symbol in data {
@@ -426,6 +429,7 @@ pub(super) fn split_commands(data: &[u16]) -> SplitResult {
     splitter.finish()
 }
 
+#[cfg(test)]
 pub(super) fn split_distances(data: &[u16], alphabet_size: usize) -> SplitResult {
     let mut splitter = GreedyBlockSplitter::distances(alphabet_size, data.len());
     for &symbol in data {
@@ -682,7 +686,8 @@ fn write_block_length(writer: &mut BitWriter, code: &PrefixEncoding, length: usi
 mod tests {
     use super::{
         BlockSplitEncoding, BlockTypeCodeCalculator, block_length_code, fast_log2, log2_table,
-        move_to_front_transform, run_length_code_zeros, split_contextual_literals, split_literals,
+        move_to_front_transform, run_length_code_zeros, split_commands, split_contextual_literals,
+        split_distances, split_literals,
     };
 
     #[test]
@@ -715,6 +720,14 @@ mod tests {
             result.histograms.iter().flatten().sum::<usize>(),
             data.len()
         );
+    }
+
+    #[test]
+    fn command_and_distance_slice_adapters_match_stream_counts() {
+        let commands = split_commands(&[1, 2, 3, 4]);
+        assert_eq!(commands.histograms.iter().flatten().sum::<usize>(), 4);
+        let distances = split_distances(&[0, 1, 2], 64);
+        assert_eq!(distances.histograms.iter().flatten().sum::<usize>(), 3);
     }
 
     #[test]
