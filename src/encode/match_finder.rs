@@ -148,7 +148,8 @@ impl QualityFiveHasher {
             let comparison_length = best_length.max(3);
             if comparison_length < max_length {
                 let compare_at = comparison_length - 3;
-                if read_u32(input, position + compare_at) != read_u32(input, previous + compare_at) {
+                if read_u32(input, position + compare_at) != read_u32(input, previous + compare_at)
+                {
                     continue;
                 }
             }
