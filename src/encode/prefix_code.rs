@@ -585,14 +585,15 @@ fn write_code_length_code(
 
 fn canonical_codes(lengths: &[u8]) -> Vec<Option<SymbolCode>> {
     let max_bits = usize::from(*lengths.iter().max().unwrap_or(&0));
-    let mut counts = vec![0_u16; max_bits + 1];
+    debug_assert!(max_bits <= MAX_CODE_BITS);
+    let mut counts = [0_u16; MAX_CODE_BITS + 1];
     for &length in lengths {
         if length != 0 {
             counts[usize::from(length)] += 1;
         }
     }
 
-    let mut next_code = vec![0_u16; max_bits + 1];
+    let mut next_code = [0_u16; MAX_CODE_BITS + 1];
     let mut code = 0_u16;
     for bits in 1..=max_bits {
         code = (code + counts[bits - 1]) << 1;
