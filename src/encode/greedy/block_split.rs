@@ -27,9 +27,25 @@ pub(super) struct BlockSplit {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct Histograms {
+    data: Vec<usize>,
+    width: usize,
+}
+
+impl Histograms {
+    pub(super) fn len(&self) -> usize {
+        self.data.len() / self.width
+    }
+
+    pub(super) fn iter(&self) -> std::slice::ChunksExact<'_, usize> {
+        self.data.chunks_exact(self.width)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct SplitResult {
     pub(super) split: BlockSplit,
-    pub(super) histograms: Vec<Vec<usize>>,
+    pub(super) histograms: Histograms,
 }
 
 #[derive(Debug, Clone)]
@@ -64,11 +80,12 @@ struct BlockTypeCodeCalculator {
 pub(super) struct GreedyBlockSplitter {
     symbol_alphabet_size: usize,
     context_count: usize,
+    histogram_size: usize,
     min_block_size: usize,
     split_threshold: f64,
     max_block_types: usize,
     split: BlockSplit,
-    histograms: Vec<Vec<usize>>,
+    histograms: Vec<usize>,
     target_block_size: usize,
     block_size: usize,
     current_histogram: usize,
@@ -248,6 +265,7 @@ impl GreedyBlockSplitter {
         Self {
             symbol_alphabet_size,
             context_count,
+            histogram_size,
             min_block_size,
             split_threshold,
             max_block_types,
@@ -256,7 +274,7 @@ impl GreedyBlockSplitter {
                 lengths: Vec::with_capacity(max_num_blocks),
                 num_types: 0,
             },
-            histograms: vec![vec![0_usize; histogram_size]; max_num_types],
+            histograms: vec![0_usize; histogram_size * max_num_types],
             target_block_size: min_block_size,
             block_size: 0,
             current_histogram: 0,
@@ -274,7 +292,8 @@ impl GreedyBlockSplitter {
         debug_assert!(symbol < self.symbol_alphabet_size);
         debug_assert!(context < self.context_count);
         let composite_symbol = context * self.symbol_alphabet_size + symbol;
-        self.histograms[self.current_histogram][composite_symbol] += 1;
+        let index = self.current_histogram * self.histogram_size + composite_symbol;
+        self.histograms[index] += 1;
         self.block_size += 1;
         if self.block_size == self.target_block_size {
             self.finish_block(false);
@@ -283,23 +302,14 @@ impl GreedyBlockSplitter {
 
     pub(super) fn finish(mut self) -> SplitResult {
         self.finish_block(true);
-        self.histograms.truncate(self.split.num_types);
-        let histograms = if self.context_count == 1 {
-            self.histograms
-        } else {
-            self.histograms
-                .into_iter()
-                .flat_map(|histogram| {
-                    histogram
-                        .chunks_exact(self.symbol_alphabet_size)
-                        .map(<[usize]>::to_vec)
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        };
+        self.histograms
+            .truncate(self.split.num_types * self.histogram_size);
         SplitResult {
             split: self.split,
-            histograms,
+            histograms: Histograms {
+                data: self.histograms,
+                width: self.symbol_alphabet_size,
+            },
         }
     }
 
@@ -308,7 +318,7 @@ impl GreedyBlockSplitter {
         if self.split.types.is_empty() {
             self.split.types.push(0);
             self.split.lengths.push(self.block_size);
-            let entropy = self.histogram_entropy(&self.histograms[0]);
+            let entropy = self.histogram_entropy(0);
             self.last_entropy = [entropy, entropy];
             self.split.num_types = 1;
             self.current_histogram += 1;
@@ -316,7 +326,7 @@ impl GreedyBlockSplitter {
             self.block_size = 0;
         } else if self.block_size > 0 {
             let current = self.current_histogram;
-            let entropy = self.histogram_entropy(&self.histograms[current]);
+            let entropy = self.histogram_entropy(current);
             let combined_entropy = [
                 self.combined_histogram_entropy(current, self.last_histograms[0]),
                 self.combined_histogram_entropy(current, self.last_histograms[1]),
@@ -345,7 +355,12 @@ impl GreedyBlockSplitter {
                 let target = self.last_histograms[1];
                 self.split.types.push(second_last_type);
                 self.split.lengths.push(self.block_size);
-                merge_histograms(&mut self.histograms, current, target);
+                merge_histograms(
+                    &mut self.histograms,
+                    self.histogram_size,
+                    current,
+                    target,
+                );
                 self.last_histograms.swap(0, 1);
                 self.last_entropy[1] = self.last_entropy[0];
                 self.last_entropy[0] = combined_entropy[1];
@@ -358,7 +373,12 @@ impl GreedyBlockSplitter {
                     .last_mut()
                     .expect("greedy splitter has a previous block") += self.block_size;
                 let target = self.last_histograms[0];
-                merge_histograms(&mut self.histograms, current, target);
+                merge_histograms(
+                    &mut self.histograms,
+                    self.histogram_size,
+                    current,
+                    target,
+                );
                 self.last_entropy[0] = combined_entropy[0];
                 if self.split.num_types == 1 {
                     self.last_entropy[1] = self.last_entropy[0];
@@ -377,24 +397,34 @@ impl GreedyBlockSplitter {
         }
     }
 
-    fn histogram_entropy(&self, histogram: &[usize]) -> f64 {
-        histogram
+    fn histogram(&self, index: usize) -> &[usize] {
+        let start = index * self.histogram_size;
+        &self.histograms[start..start + self.histogram_size]
+    }
+
+    fn histogram_entropy(&self, index: usize) -> f64 {
+        self.histogram(index)
             .chunks_exact(self.symbol_alphabet_size)
             .map(bits_entropy)
             .sum()
     }
 
     fn combined_histogram_entropy(&self, left: usize, right: usize) -> f64 {
-        self.histograms[left]
+        self.histogram(left)
             .chunks_exact(self.symbol_alphabet_size)
-            .zip(self.histograms[right].chunks_exact(self.symbol_alphabet_size))
+            .zip(
+                self.histogram(right)
+                    .chunks_exact(self.symbol_alphabet_size),
+            )
             .map(|(left, right)| combined_bits_entropy(left, right))
             .sum()
     }
 
     fn clear_current_histogram(&mut self) {
-        if let Some(histogram) = self.histograms.get_mut(self.current_histogram) {
-            histogram.fill(0);
+        let start = self.current_histogram * self.histogram_size;
+        let end = start + self.histogram_size;
+        if end <= self.histograms.len() {
+            self.histograms[start..end].fill(0);
         }
     }
 
@@ -630,17 +660,18 @@ fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
     entropy.max(total as f64)
 }
 
-fn merge_histograms(histograms: &mut [Vec<usize>], source: usize, target: usize) {
+fn merge_histograms(
+    histograms: &mut [usize],
+    histogram_size: usize,
+    source: usize,
+    target: usize,
+) {
     debug_assert_ne!(source, target);
-    let (source_histogram, target_histogram) = if source < target {
-        let (before_target, from_target) = histograms.split_at_mut(target);
-        (&before_target[source], &mut from_target[0])
-    } else {
-        let (before_source, from_source) = histograms.split_at_mut(source);
-        (&from_source[0], &mut before_source[target])
-    };
-    for (target, source) in target_histogram.iter_mut().zip(source_histogram) {
-        *target += *source;
+    let source_start = source * histogram_size;
+    let target_start = target * histogram_size;
+    for offset in 0..histogram_size {
+        let source = histograms[source_start + offset];
+        histograms[target_start + offset] += source;
     }
 }
 
@@ -698,7 +729,7 @@ mod tests {
         let result = split_literals(&[b'a'; 4096]);
         assert_eq!(result.split.num_types, 1);
         assert_eq!(result.histograms.len(), 1);
-        assert_eq!(result.histograms[0][usize::from(b'a')], 4096);
+        assert_eq!(result.histograms.iter().next().unwrap()[usize::from(b'a')], 4096);
     }
 
     #[test]
