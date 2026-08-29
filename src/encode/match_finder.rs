@@ -92,12 +92,13 @@ impl QualityFiveHasher {
         position: usize,
         max_length: usize,
         max_backward: usize,
+        best_length_hint: usize,
     ) -> SearchResult {
         let key = hash4(input, position);
         let count = usize::from(self.counts[key]);
         let bucket_start = key << BLOCK_BITS;
         let mut result = SearchResult::new();
-        let mut best_length = 0_usize;
+        let mut best_length = best_length_hint.min(max_length);
         let mut best_score = MIN_SCORE;
 
         for (index, &backward) in recent_distances
@@ -231,6 +232,7 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
             position,
             end - position,
             max_backward,
+            0,
         );
 
         if result.score > MIN_SCORE {
@@ -238,12 +240,14 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
             loop {
                 let next_position = position + 1;
                 let next_max_backward = next_position.min(MAX_BACKWARD_DISTANCE);
+                let next_max_length = end - next_position;
                 let next = hasher.find_longest_match(
                     input,
                     recent_distances.values(),
                     next_position,
-                    end - next_position,
+                    next_max_length,
                     next_max_backward,
+                    result.length.saturating_sub(1).min(next_max_length),
                 );
                 if next.score >= result.score + LAZY_SCORE_DELTA {
                     position = next_position;
