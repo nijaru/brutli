@@ -1,8 +1,8 @@
 mod block_split;
 
 use block_split::{
-    BlockCursor, BlockSplitEncoding, GreedyBlockSplitter, Histograms, SplitResult,
-    write_context_map, write_trivial_context_map,
+    BlockCursor, BlockSplitEncoding, GreedyBlockSplitter, SplitResult, write_context_map,
+    write_trivial_context_map,
 };
 
 use crate::decode::context::LiteralContextMode;
@@ -495,20 +495,13 @@ fn write_literal_context_map(
     write_context_map(writer, &map, literal_trees)
 }
 
-fn prefix_codes(histograms: Histograms, alphabet_size: u16) -> Option<Vec<PrefixEncoding>> {
-    let alphabet_size = usize::from(alphabet_size);
-    let mut seeded_empty = vec![0_usize; alphabet_size];
-    seeded_empty[0] = 1;
+fn prefix_codes(histograms: Vec<Vec<usize>>, alphabet_size: u16) -> Option<Vec<PrefixEncoding>> {
     histograms
-        .iter()
-        .map(|histogram| {
-            debug_assert_eq!(histogram.len(), alphabet_size);
-            let frequencies = if histogram.iter().all(|&frequency| frequency == 0) {
-                seeded_empty.as_slice()
-            } else {
-                histogram
-            };
-            PrefixEncoding::from_frequencies(frequencies)
+        .into_iter()
+        .map(|mut histogram| {
+            debug_assert_eq!(histogram.len(), usize::from(alphabet_size));
+            seed_empty_histogram(&mut histogram);
+            PrefixEncoding::from_frequencies(&histogram)
         })
         .collect()
 }
