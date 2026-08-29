@@ -44,32 +44,40 @@ impl HuffmanNode {
 
 #[derive(Debug, Clone)]
 pub(super) struct PrefixEncoding {
-    symbols: Vec<u16>,
+    simple_symbols: [u16; 4],
+    simple_symbol_count: u8,
     codes: Vec<Option<SymbolCode>>,
     lengths: Vec<u8>,
 }
 
 impl PrefixEncoding {
     pub(super) fn from_frequencies(frequencies: &[usize]) -> Option<Self> {
-        let mut symbols: Vec<u16> = frequencies
-            .iter()
-            .enumerate()
-            .filter(|&(_, &frequency)| frequency != 0)
-            .map(|(symbol, _)| u16::try_from(symbol).expect("alphabet fits in u16"))
-            .collect();
-        if symbols.is_empty() {
+        let mut simple_symbols = [0_u16; 4];
+        let mut symbol_count = 0_usize;
+        for (symbol, &frequency) in frequencies.iter().enumerate() {
+            if frequency == 0 {
+                continue;
+            }
+            if symbol_count < simple_symbols.len() {
+                simple_symbols[symbol_count] =
+                    u16::try_from(symbol).expect("alphabet fits in u16");
+            }
+            symbol_count += 1;
+        }
+        if symbol_count == 0 {
             return None;
         }
 
-        if symbols.len() <= 4 {
-            symbols.sort_unstable();
+        if symbol_count <= simple_symbols.len() {
+            simple_symbols[..symbol_count].sort_unstable();
             let mut codes = vec![None; frequencies.len()];
-            for (index, &symbol) in symbols.iter().enumerate() {
-                let (code, bits) = simple_symbol_code(index, symbols.len());
+            for (index, &symbol) in simple_symbols[..symbol_count].iter().enumerate() {
+                let (code, bits) = simple_symbol_code(index, symbol_count);
                 codes[usize::from(symbol)] = Some(SymbolCode { code, bits });
             }
             return Some(Self {
-                symbols,
+                simple_symbols,
+                simple_symbol_count: symbol_count as u8,
                 codes,
                 lengths: Vec::new(),
             });
@@ -77,9 +85,9 @@ impl PrefixEncoding {
 
         let lengths = huffman_code_lengths(frequencies);
         let codes = canonical_codes(&lengths);
-        symbols.sort_unstable();
         Some(Self {
-            symbols,
+            simple_symbols,
+            simple_symbol_count: 0,
             codes,
             lengths,
         })
@@ -102,8 +110,13 @@ impl PrefixEncoding {
 
     pub(super) fn write_tree(&self, writer: &mut BitWriter, alphabet_size: u16) {
         debug_assert_eq!(self.codes.len(), usize::from(alphabet_size));
-        if self.symbols.len() <= 4 {
-            write_simple_prefix_code(writer, &self.symbols, alphabet_size);
+        let simple_symbol_count = usize::from(self.simple_symbol_count);
+        if simple_symbol_count != 0 {
+            write_simple_prefix_code(
+                writer,
+                &self.simple_symbols[..simple_symbol_count],
+                alphabet_size,
+            );
         } else {
             write_complex_prefix_code(writer, &self.lengths);
         }
