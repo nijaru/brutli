@@ -42,7 +42,10 @@ impl PrefixEncoding {
             let mut codes = vec![None; frequencies.len()];
             for (index, &symbol) in symbols.iter().enumerate() {
                 let (code, bits) = simple_symbol_code(index, symbols.len());
-                codes[usize::from(symbol)] = Some(SymbolCode { code, bits });
+                codes[usize::from(symbol)] = Some(SymbolCode {
+                    code: reverse_prefix(code, bits),
+                    bits,
+                });
             }
             return Some(Self {
                 symbols,
@@ -87,7 +90,7 @@ impl PrefixEncoding {
 
     pub(super) fn write_symbol(&self, writer: &mut BitWriter, symbol: u16) {
         let code = self.codes[usize::from(symbol)].expect("symbol exists in prefix code");
-        writer.write_prefix(code.code, code.bits);
+        writer.write_bits(u64::from(code.code), code.bits);
     }
 }
 
@@ -287,6 +290,14 @@ fn simple_symbol_code(symbol_index: usize, symbol_count: usize) -> (u16, u8) {
     }
 }
 
+fn reverse_prefix(code: u16, bits: u8) -> u16 {
+    if bits == 0 {
+        0
+    } else {
+        code.reverse_bits() >> (u16::BITS as u8 - bits)
+    }
+}
+
 fn write_complex_prefix_code(writer: &mut BitWriter, lengths: &[u8]) {
     debug_assert!(lengths.iter().filter(|&&length| length != 0).count() > 4);
     let tokens = tokenize_code_lengths(lengths);
@@ -301,7 +312,7 @@ fn write_complex_prefix_code(writer: &mut BitWriter, lengths: &[u8]) {
     for token in tokens {
         let code = code_length_codes[usize::from(token.symbol)]
             .expect("code-length token is present in its prefix code");
-        writer.write_prefix(code.code, code.bits);
+        writer.write_bits(u64::from(code.code), code.bits);
         match token.symbol {
             16 => writer.write_bits(u64::from(token.extra), 2),
             17 => writer.write_bits(u64::from(token.extra), 3),
@@ -540,7 +551,10 @@ fn canonical_codes(lengths: &[u8]) -> Vec<Option<SymbolCode>> {
             let bits = usize::from(length);
             let code = next_code[bits];
             next_code[bits] += 1;
-            Some(SymbolCode { code, bits: length })
+            Some(SymbolCode {
+                code: reverse_prefix(code, length),
+                bits: length,
+            })
         })
         .collect()
 }
