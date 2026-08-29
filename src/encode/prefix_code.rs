@@ -4,6 +4,7 @@ const MAX_CODE_BITS: usize = 15;
 const CODE_LENGTH_CODE_BITS: usize = 5;
 const INITIAL_REPEATED_CODE_LENGTH: u8 = 8;
 const CODE_LENGTH_ORDER: [u8; 18] = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const LEAF_SENTINEL: u16 = u16::MAX;
 
 #[derive(Debug, Clone, Copy)]
 struct SymbolCode {
@@ -13,9 +14,31 @@ struct SymbolCode {
 
 #[derive(Debug, Clone, Copy)]
 struct HuffmanNode {
-    total_count: u128,
-    children: Option<(usize, usize)>,
-    symbol: Option<u16>,
+    total_count: u32,
+    left: u16,
+    right_or_symbol: u16,
+}
+
+impl HuffmanNode {
+    fn leaf(total_count: u32, symbol: usize) -> Self {
+        Self {
+            total_count,
+            left: LEAF_SENTINEL,
+            right_or_symbol: u16::try_from(symbol).expect("alphabet fits in u16"),
+        }
+    }
+
+    fn parent(total_count: u32, left: usize, right: usize) -> Self {
+        Self {
+            total_count,
+            left: u16::try_from(left).expect("Huffman tree index fits in u16"),
+            right_or_symbol: u16::try_from(right).expect("Huffman tree index fits in u16"),
+        }
+    }
+
+    const fn is_leaf(self) -> bool {
+        self.left == LEAF_SENTINEL
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +125,7 @@ fn huffman_code_lengths_with_limit(frequencies: &[usize], max_code_bits: usize) 
         .count();
     debug_assert!(active_count != 0);
     debug_assert!(active_count <= 1_usize << max_code_bits);
+    debug_assert!(active_count * 2 - 1 < usize::from(LEAF_SENTINEL));
 
     if active_count == 1 {
         let mut lengths = vec![0_u8; frequencies.len()];
@@ -113,26 +137,20 @@ fn huffman_code_lengths_with_limit(frequencies: &[usize], max_code_bits: usize) 
         return lengths;
     }
 
-    let mut count_limit = 1_u128;
+    let mut count_limit = 1_u32;
     loop {
         let mut nodes = Vec::with_capacity(active_count * 2 - 1);
         for (symbol, &frequency) in frequencies.iter().enumerate() {
             if frequency == 0 {
                 continue;
             }
-            nodes.push(HuffmanNode {
-                total_count: (frequency as u128).max(count_limit),
-                children: None,
-                symbol: Some(u16::try_from(symbol).expect("alphabet fits in u16")),
-            });
+            let frequency = u32::try_from(frequency).expect("Brotli histogram count fits in u32");
+            nodes.push(HuffmanNode::leaf(frequency.max(count_limit), symbol));
         }
         nodes.sort_unstable_by(|left, right| {
-            left.total_count.cmp(&right.total_count).then_with(|| {
-                right
-                    .symbol
-                    .expect("leaf has symbol")
-                    .cmp(&left.symbol.expect("leaf has symbol"))
-            })
+            left.total_count
+                .cmp(&right.total_count)
+                .then_with(|| right.right_or_symbol.cmp(&left.right_or_symbol))
         });
 
         let leaf_count = nodes.len();
@@ -141,34 +159,53 @@ fn huffman_code_lengths_with_limit(frequencies: &[usize], max_code_bits: usize) 
         for _ in 1..leaf_count {
             let left = take_smallest_node(&nodes, leaf_count, &mut next_leaf, &mut next_parent);
             let right = take_smallest_node(&nodes, leaf_count, &mut next_leaf, &mut next_parent);
-            nodes.push(HuffmanNode {
-                total_count: nodes[left].total_count + nodes[right].total_count,
-                children: Some((left, right)),
-                symbol: None,
-            });
+            let total_count = nodes[left]
+                .total_count
+                .checked_add(nodes[right].total_count)
+                .expect("Brotli Huffman population fits in u32");
+            nodes.push(HuffmanNode::parent(total_count, left, right));
         }
 
         let mut lengths = vec![0_u8; frequencies.len()];
-        let mut stack = vec![(nodes.len() - 1, 0_usize)];
-        let mut fits = true;
-        while let Some((node_index, depth)) = stack.pop() {
-            let node = nodes[node_index];
-            if let Some((left, right)) = node.children {
-                let child_depth = depth + 1;
-                if child_depth > max_code_bits {
-                    fits = false;
-                    break;
-                }
-                stack.push((right, child_depth));
-                stack.push((left, child_depth));
-            } else {
-                lengths[usize::from(node.symbol.expect("leaf has symbol"))] = depth as u8;
-            }
-        }
-        if fits {
+        if set_huffman_depths(&nodes, nodes.len() - 1, &mut lengths, max_code_bits) {
             return lengths;
         }
         count_limit *= 2;
+    }
+}
+
+fn set_huffman_depths(
+    nodes: &[HuffmanNode],
+    root: usize,
+    lengths: &mut [u8],
+    max_code_bits: usize,
+) -> bool {
+    debug_assert!(max_code_bits <= MAX_CODE_BITS);
+    let mut stack = [LEAF_SENTINEL; MAX_CODE_BITS + 1];
+    let mut level = 0_usize;
+    let mut node_index = u16::try_from(root).expect("Huffman tree index fits in u16");
+
+    loop {
+        let node = nodes[usize::from(node_index)];
+        if !node.is_leaf() {
+            level += 1;
+            if level > max_code_bits {
+                return false;
+            }
+            stack[level] = node.right_or_symbol;
+            node_index = node.left;
+            continue;
+        }
+
+        lengths[usize::from(node.right_or_symbol)] = level as u8;
+        while stack[level] == LEAF_SENTINEL {
+            if level == 0 {
+                return true;
+            }
+            level -= 1;
+        }
+        node_index = stack[level];
+        stack[level] = LEAF_SENTINEL;
     }
 }
 
