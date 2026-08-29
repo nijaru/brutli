@@ -335,7 +335,11 @@ fn hash4(input: &[u8], position: usize) -> usize {
 
 #[inline(always)]
 fn read_u32(input: &[u8], position: usize) -> u32 {
-    debug_assert!(position.checked_add(4).is_some_and(|end| end <= input.len()));
+    debug_assert!(
+        position
+            .checked_add(4)
+            .is_some_and(|end| end <= input.len())
+    );
     // SAFETY: all callers ensure that four bytes starting at `position` are
     // within `input`; `read_unaligned` does not require pointer alignment.
     unsafe { std::ptr::read_unaligned(input.as_ptr().add(position).cast::<u32>()).to_le() }
