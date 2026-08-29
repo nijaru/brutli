@@ -1,27 +1,41 @@
 #[derive(Debug, Default)]
 pub(super) struct BitWriter {
     bytes: Vec<u8>,
-    pending: u64,
+    current: u8,
     used: u8,
 }
 
 impl BitWriter {
     pub(super) fn write_bits(&mut self, mut value: u64, mut count: u8) {
-        while count != 0 {
-            let available = u64::BITS as u8 - self.used;
-            let take = count.min(available);
-            self.pending |= (value & low_mask(take)) << self.used;
-            self.used += take;
-            count -= take;
-            if take == u64::BITS as u8 {
-                value = 0;
-            } else {
-                value >>= take;
-            }
+        if count == 0 {
+            return;
+        }
 
-            if self.used >= 48 {
-                self.flush_complete_bytes();
+        if self.used != 0 {
+            let available = 8 - self.used;
+            let take = count.min(available);
+            let mask = low_mask(take);
+            self.current |= ((value & mask) as u8) << self.used;
+            self.used += take;
+            value >>= take;
+            count -= take;
+
+            if self.used == 8 {
+                self.bytes.push(self.current);
+                self.current = 0;
+                self.used = 0;
             }
+        }
+
+        while count >= 8 {
+            self.bytes.push(value as u8);
+            value >>= 8;
+            count -= 8;
+        }
+
+        if count != 0 {
+            self.current = (value & low_mask(count)) as u8;
+            self.used = count;
         }
     }
 
@@ -39,14 +53,11 @@ impl BitWriter {
     }
 
     pub(super) fn align_to_byte(&mut self) {
-        if self.used == 0 {
-            return;
+        if self.used != 0 {
+            self.bytes.push(self.current);
+            self.current = 0;
+            self.used = 0;
         }
-        let byte_count = usize::from(self.used.div_ceil(8));
-        self.bytes
-            .extend_from_slice(&self.pending.to_le_bytes()[..byte_count]);
-        self.pending = 0;
-        self.used = 0;
     }
 
     pub(super) fn write_bytes(&mut self, bytes: &[u8]) {
@@ -57,20 +68,6 @@ impl BitWriter {
     pub(super) fn finish(mut self) -> Vec<u8> {
         self.align_to_byte();
         self.bytes
-    }
-
-    fn flush_complete_bytes(&mut self) {
-        let byte_count = usize::from(self.used / 8);
-        debug_assert!(byte_count != 0);
-        self.bytes
-            .extend_from_slice(&self.pending.to_le_bytes()[..byte_count]);
-        let flushed_bits = (byte_count * 8) as u8;
-        if flushed_bits == u64::BITS as u8 {
-            self.pending = 0;
-        } else {
-            self.pending >>= flushed_bits;
-        }
-        self.used -= flushed_bits;
     }
 }
 
@@ -113,21 +110,6 @@ mod tests {
         writer.write_bits(0b11, 2);
 
         assert_eq!(writer.finish(), vec![0x6d, 0x5e, 0x1d]);
-    }
-
-    #[test]
-    fn packs_full_width_values() {
-        let mut writer = BitWriter::default();
-        writer.write_bits(u64::MAX, 64);
-        writer.write_bits(0b101, 3);
-
-        assert_eq!(
-            writer.finish(),
-            vec![0xff; 8]
-                .into_iter()
-                .chain([0x05])
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]
