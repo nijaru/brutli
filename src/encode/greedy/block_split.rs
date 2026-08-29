@@ -593,39 +593,31 @@ fn run_length_code_zeros(values: &mut Vec<u32>) -> u32 {
 }
 
 fn bits_entropy(histogram: &[usize]) -> f64 {
-    let total = histogram.iter().sum::<usize>();
-    if total == 0 {
-        return 0.0;
-    }
     let table = log2_table();
-    let total_log = fast_log2(total, table);
+    let mut total = 0_usize;
     let mut entropy = 0.0_f64;
     for &count in histogram {
-        if count != 0 {
-            entropy += count as f64 * (total_log - fast_log2(count, table));
-        }
+        total += count;
+        entropy -= count as f64 * fast_log2(count, table);
+    }
+    if total != 0 {
+        entropy += total as f64 * fast_log2(total, table);
     }
     entropy.max(total as f64)
 }
 
 fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
     debug_assert_eq!(left.len(), right.len());
-    let total = left
-        .iter()
-        .zip(right)
-        .map(|(&left, &right)| left + right)
-        .sum::<usize>();
-    if total == 0 {
-        return 0.0;
-    }
     let table = log2_table();
-    let total_log = fast_log2(total, table);
+    let mut total = 0_usize;
     let mut entropy = 0.0_f64;
     for (&left, &right) in left.iter().zip(right) {
         let count = left + right;
-        if count != 0 {
-            entropy += count as f64 * (total_log - fast_log2(count, table));
-        }
+        total += count;
+        entropy -= count as f64 * fast_log2(count, table);
+    }
+    if total != 0 {
+        entropy += total as f64 * fast_log2(total, table);
     }
     entropy.max(total as f64)
 }
