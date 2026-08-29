@@ -149,7 +149,20 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         literal_context,
     };
 
-    let single_tree = encode_single_tree(&plan, &literal_code);
+    let single_tree_size = estimate_single_tree_size(
+        &plan,
+        &literal_code,
+        &literal_frequencies,
+        &command_frequencies,
+        &distance_frequencies,
+    );
+    #[cfg(test)]
+    assert_eq!(
+        single_tree_size,
+        encode_single_tree(&plan, &literal_code).len(),
+        "single-tree bit estimate must match serialized size"
+    );
+
     let split_tree = encode_greedy_splits(
         &plan,
         &literal_data,
@@ -157,11 +170,44 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         &command_data,
         &distance_data,
     )?;
-    Some(if split_tree.len() < single_tree.len() {
+    Some(if split_tree.len() < single_tree_size {
         split_tree
     } else {
-        single_tree
+        encode_single_tree(&plan, &literal_code)
     })
+}
+
+fn estimate_single_tree_size(
+    plan: &EncodingPlan<'_>,
+    literal_code: &PrefixEncoding,
+    literal_frequencies: &[usize],
+    command_frequencies: &[usize],
+    distance_frequencies: &[usize],
+) -> usize {
+    let mut writer = BitWriter::default();
+    write_window_bits(&mut writer, super::DEFAULT_WINDOW_BITS);
+    write_final_compressed_header(&mut writer, plan.input.len());
+    write_simple_compressed_header(&mut writer, GREEDY_DIRECT_DISTANCE_CODES);
+    literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
+    plan.command_code
+        .write_tree(&mut writer, COMMAND_ALPHABET_SIZE);
+    plan.distance_code
+        .write_tree(&mut writer, plan.distance_alphabet);
+
+    let mut bits = writer.bit_len();
+    bits += literal_code.data_bits(literal_frequencies);
+    bits += plan.command_code.data_bits(command_frequencies);
+    bits += plan.distance_code.data_bits(distance_frequencies);
+    for encoded in plan.commands {
+        bits += usize::from(encoded.command.extra_bit_count());
+        if let Some(distance) = encoded.distance {
+            bits += usize::from(distance.extra_bit_count());
+        }
+    }
+    if let Some(command) = plan.tail_command {
+        bits += usize::from(command.extra_bit_count());
+    }
+    bits.div_ceil(8)
 }
 
 fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) -> Vec<u8> {
