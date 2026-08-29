@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use super::super::bit_writer::BitWriter;
 use super::super::prefix_code::{PrefixEncoding, write_var_len_u8};
 
@@ -5,6 +7,9 @@ const MAX_BLOCK_TYPES: usize = 256;
 const BLOCK_LENGTH_ALPHABET_SIZE: usize = 26;
 const MAX_CONTEXT_MAP_RUN_LENGTH_PREFIX: u32 = 6;
 const CONTEXT_MAP_SYMBOL_BITS: u32 = 9;
+const LOG2_TABLE_SIZE: usize = 256;
+
+static LOG2_TABLE: OnceLock<[f64; LOG2_TABLE_SIZE]> = OnceLock::new();
 
 const BLOCK_LENGTH_OFFSETS: [usize; BLOCK_LENGTH_ALPHABET_SIZE] = [
     1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305, 369, 497, 753, 1265,
@@ -570,11 +575,12 @@ fn bits_entropy(histogram: &[usize]) -> f64 {
     if total == 0 {
         return 0.0;
     }
-    let total_log = fast_log2(total);
+    let table = log2_table();
+    let total_log = fast_log2(total, table);
     let mut entropy = 0.0_f64;
     for &count in histogram {
         if count != 0 {
-            entropy += count as f64 * (total_log - fast_log2(count));
+            entropy += count as f64 * (total_log - fast_log2(count, table));
         }
     }
     entropy.max(total as f64)
@@ -590,12 +596,13 @@ fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
     if total == 0 {
         return 0.0;
     }
-    let total_log = fast_log2(total);
+    let table = log2_table();
+    let total_log = fast_log2(total, table);
     let mut entropy = 0.0_f64;
     for (&left, &right) in left.iter().zip(right) {
         let count = left + right;
         if count != 0 {
-            entropy += count as f64 * (total_log - fast_log2(count));
+            entropy += count as f64 * (total_log - fast_log2(count, table));
         }
     }
     entropy.max(total as f64)
@@ -615,9 +622,21 @@ fn merge_histograms(histograms: &mut [Vec<usize>], source: usize, target: usize)
     }
 }
 
-fn fast_log2(value: usize) -> f64 {
-    if value == 0 {
-        0.0
+fn log2_table() -> &'static [f64; LOG2_TABLE_SIZE] {
+    LOG2_TABLE.get_or_init(|| {
+        std::array::from_fn(|value| {
+            if value == 0 {
+                0.0
+            } else {
+                (value as f64).log2()
+            }
+        })
+    })
+}
+
+fn fast_log2(value: usize, table: &[f64; LOG2_TABLE_SIZE]) -> f64 {
+    if value < LOG2_TABLE_SIZE {
+        table[value]
     } else {
         (value as f64).log2()
     }
@@ -647,8 +666,8 @@ fn write_block_length(writer: &mut BitWriter, code: &PrefixEncoding, length: usi
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockSplitEncoding, BlockTypeCodeCalculator, block_length_code, move_to_front_transform,
-        run_length_code_zeros, split_contextual_literals, split_literals,
+        BlockSplitEncoding, BlockTypeCodeCalculator, block_length_code, fast_log2, log2_table,
+        move_to_front_transform, run_length_code_zeros, split_contextual_literals, split_literals,
     };
 
     #[test]
@@ -709,6 +728,19 @@ mod tests {
         let result = split_literals(&[b'a'; 1024]);
         let encoding = BlockSplitEncoding::new(result.split).unwrap();
         assert_eq!(encoding.num_types(), 1);
+    }
+
+    #[test]
+    fn cached_log2_matches_direct_values() {
+        let table = log2_table();
+        for value in 0..table.len() {
+            let expected = if value == 0 {
+                0.0
+            } else {
+                (value as f64).log2()
+            };
+            assert_eq!(fast_log2(value, table), expected);
+        }
     }
 
     #[test]
