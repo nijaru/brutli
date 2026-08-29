@@ -384,12 +384,7 @@ fn matching_tag_mask(
 }
 
 #[cfg(target_arch = "x86_64")]
-fn full_tag_mask(
-    tags: &[MaybeUninit<u8>],
-    bucket_start: usize,
-    tag: u8,
-    head: usize,
-) -> u16 {
+fn full_tag_mask(tags: &[MaybeUninit<u8>], bucket_start: usize, tag: u8, head: usize) -> u16 {
     use std::arch::x86_64::{
         __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
     };
@@ -407,12 +402,7 @@ fn full_tag_mask(
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn full_tag_mask(
-    tags: &[MaybeUninit<u8>],
-    bucket_start: usize,
-    tag: u8,
-    head: usize,
-) -> u16 {
+fn full_tag_mask(tags: &[MaybeUninit<u8>], bucket_start: usize, tag: u8, head: usize) -> u16 {
     let mut physical_mask = 0_u16;
     for ring_index in 0..BLOCK_SIZE {
         // SAFETY: this helper is called only after all tag slots are initialized.
