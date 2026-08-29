@@ -1,8 +1,8 @@
 mod block_split;
 
 use block_split::{
-    BlockCursor, BlockSplitEncoding, split_commands, split_contextual_literals, split_distances,
-    split_literals, write_context_map, write_trivial_context_map,
+    BlockCursor, BlockSplitEncoding, GreedyBlockSplitter, SplitResult, write_context_map,
+    write_trivial_context_map,
 };
 
 use crate::decode::context::LiteralContextMode;
@@ -27,7 +27,7 @@ const CONTEXT_SAVINGS_THRESHOLD: f64 = 0.2;
 const NO_LITERAL_CONTEXT_MAP: [u8; 64] = [0; 64];
 const SIMPLE_UTF8_CONTEXT_MAP: [u8; 64] = [
     0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const COMPLEX_UTF8_CONTEXT_MAP: [u8; 64] = [
     11, 11, 12, 12, 0, 0, 0, 0, 1, 1, 9, 9, 2, 2, 2, 2, 1, 1, 1, 1, 8, 3, 3, 3, 1, 1, 1, 1, 2, 2,
@@ -59,6 +59,12 @@ struct EncodingPlan<'a> {
     literal_context: LiteralContextPlan,
 }
 
+struct GreedySplits {
+    literal: SplitResult,
+    command: SplitResult,
+    distance: SplitResult,
+}
+
 pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
         return None;
@@ -71,14 +77,40 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
 
     let literal_context = choose_q5_literal_context(input);
     let distance_alphabet = alphabet_size(GREEDY_DIRECT_DISTANCE_CODES);
+    let tail_length = input.len() - parse.tail_start;
+    let literal_count = parse
+        .commands
+        .iter()
+        .map(|command| command.insert_length)
+        .sum::<usize>()
+        + tail_length;
+    let command_count = parse.commands.len() + usize::from(tail_length != 0);
+    let distance_count = parse
+        .commands
+        .iter()
+        .filter(|parsed| {
+            ExplicitCommand::for_insert_and_copy_code(
+                parsed.insert_length,
+                parsed.copy_length_code,
+                parsed.distance_code == 0,
+            )
+            .requires_distance()
+        })
+        .count();
+
+    let mut literal_splitter = if literal_context.count == 1 {
+        GreedyBlockSplitter::literals(literal_count)
+    } else {
+        GreedyBlockSplitter::contextual_literals(literal_context.count, literal_count)
+    };
+    let mut command_splitter = GreedyBlockSplitter::commands(command_count);
+    let mut distance_splitter =
+        GreedyBlockSplitter::distances(usize::from(distance_alphabet), distance_count);
+
     let mut literal_frequencies = vec![0_usize; usize::from(LITERAL_ALPHABET_SIZE)];
     let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
     let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
     let mut commands = Vec::with_capacity(parse.commands.len());
-    let mut literal_data = Vec::new();
-    let mut contextual_literal_data = (literal_context.count > 1).then(Vec::new);
-    let mut command_data = Vec::with_capacity(parse.commands.len() + 1);
-    let mut distance_data = Vec::new();
 
     for parsed in parse.commands {
         let command = ExplicitCommand::for_insert_and_copy_code(
@@ -90,10 +122,10 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
             .requires_distance()
             .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES));
         command_frequencies[usize::from(command.symbol)] += 1;
-        command_data.push(command.symbol);
+        command_splitter.add_symbol(usize::from(command.symbol));
         if let Some(distance) = distance {
             distance_frequencies[usize::from(distance.symbol)] += 1;
-            distance_data.push(distance.symbol);
+            distance_splitter.add_symbol(usize::from(distance.symbol));
         }
         let literal_start = parsed.insert_start;
         let literal_end = literal_start + parsed.insert_length;
@@ -103,8 +135,7 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
             literal_end,
             literal_context,
             &mut literal_frequencies,
-            &mut literal_data,
-            contextual_literal_data.as_mut(),
+            &mut literal_splitter,
         );
         commands.push(EncodedMatch {
             parsed,
@@ -119,17 +150,21 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     } else {
         let command = InsertCommand::for_length(tail.len());
         command_frequencies[usize::from(command.symbol)] += 1;
-        command_data.push(command.symbol);
+        command_splitter.add_symbol(usize::from(command.symbol));
         collect_literals(
             input,
             parse.tail_start,
             input.len(),
             literal_context,
             &mut literal_frequencies,
-            &mut literal_data,
-            contextual_literal_data.as_mut(),
+            &mut literal_splitter,
         );
         Some(command)
+    };
+    let splits = GreedySplits {
+        literal: literal_splitter.finish(),
+        command: command_splitter.finish(),
+        distance: distance_splitter.finish(),
     };
 
     seed_empty_histogram(&mut literal_frequencies);
@@ -163,13 +198,7 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         "single-tree bit estimate must match serialized size"
     );
 
-    let split_tree = encode_greedy_splits(
-        &plan,
-        &literal_data,
-        contextual_literal_data.as_deref(),
-        &command_data,
-        &distance_data,
-    )?;
+    let split_tree = encode_greedy_splits(&plan, splits)?;
     Some(if split_tree.len() < single_tree_size {
         split_tree
     } else {
@@ -247,20 +276,12 @@ fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) ->
     writer.finish()
 }
 
-fn encode_greedy_splits(
-    plan: &EncodingPlan<'_>,
-    literals: &[u8],
-    contextual_literals: Option<&[(u8, u8)]>,
-    command_symbols: &[u16],
-    distance_symbols: &[u16],
-) -> Option<Vec<u8>> {
-    let literal_result = if plan.literal_context.count == 1 {
-        split_literals(literals)
-    } else {
-        split_contextual_literals(contextual_literals?, plan.literal_context.count)
-    };
-    let command_result = split_commands(command_symbols);
-    let distance_result = split_distances(distance_symbols, usize::from(plan.distance_alphabet));
+fn encode_greedy_splits(plan: &EncodingPlan<'_>, splits: GreedySplits) -> Option<Vec<u8>> {
+    let GreedySplits {
+        literal: literal_result,
+        command: command_result,
+        distance: distance_result,
+    } = splits;
 
     let literal_codes = prefix_codes(literal_result.histograms, LITERAL_ALPHABET_SIZE)?;
     let command_codes = prefix_codes(command_result.histograms, COMMAND_ALPHABET_SIZE)?;
@@ -437,17 +458,19 @@ fn collect_literals(
     end: usize,
     context_plan: LiteralContextPlan,
     frequencies: &mut [usize],
-    literals: &mut Vec<u8>,
-    contextual_literals: Option<&mut Vec<(u8, u8)>>,
+    splitter: &mut GreedyBlockSplitter,
 ) {
-    let mut contextual_literals = contextual_literals;
     for position in start..end {
         let literal = input[position];
         frequencies[usize::from(literal)] += 1;
-        literals.push(literal);
-        if let Some(samples) = contextual_literals.as_deref_mut() {
+        if context_plan.count == 1 {
+            splitter.add_symbol(usize::from(literal));
+        } else {
             let context_id = utf8_context_id(input, position);
-            samples.push((literal, context_plan.map[context_id]));
+            splitter.add_context_symbol(
+                usize::from(literal),
+                usize::from(context_plan.map[context_id]),
+            );
         }
     }
 }
