@@ -37,8 +37,8 @@ pub(super) struct ExplicitCommand {
 
 impl InsertCommand {
     pub(super) fn for_length(length: usize) -> Self {
-        let insert = length_code(length, &INSERT_BASE, &INSERT_EXTRA_BITS);
-        let copy = length_code(4, &COPY_BASE, &COPY_EXTRA_BITS);
+        let insert = insert_length_code(length);
+        let copy = copy_length_code(4);
         let symbol = combine_length_codes(insert.code, copy.code, false);
         Self {
             symbol,
@@ -67,8 +67,8 @@ impl ExplicitCommand {
         copy_length_code: usize,
         use_last_distance: bool,
     ) -> Self {
-        let insert = length_code(insert_length, &INSERT_BASE, &INSERT_EXTRA_BITS);
-        let copy = length_code(copy_length_code, &COPY_BASE, &COPY_EXTRA_BITS);
+        let insert = insert_length_code(insert_length);
+        let copy = copy_length_code(copy_length_code);
         let symbol = combine_length_codes(insert.code, copy.code, use_last_distance);
         Self {
             symbol,
@@ -91,21 +91,55 @@ impl ExplicitCommand {
     }
 }
 
-fn length_code(length: usize, bases: &[usize; 24], extra_bits: &[u8; 24]) -> LengthCode {
-    let code = bases
-        .iter()
-        .zip(extra_bits.iter().copied())
-        .position(|(&base, bits)| {
-            let range = 1_usize << bits;
-            length >= base && length - base < range
-        })
-        .expect("RFC 7932 length code covers the requested length");
+fn insert_length_code(length: usize) -> LengthCode {
+    let code = if length < 6 {
+        length
+    } else if length < 130 {
+        let nbits = log2_floor_nonzero(length - 2) - 1;
+        (nbits << 1) + ((length - 2) >> nbits) + 2
+    } else if length < 2114 {
+        log2_floor_nonzero(length - 66) + 10
+    } else if length < 6210 {
+        21
+    } else if length < 22594 {
+        22
+    } else {
+        23
+    };
+    make_length_code(length, code, &INSERT_BASE, &INSERT_EXTRA_BITS)
+}
 
+fn copy_length_code(length: usize) -> LengthCode {
+    debug_assert!(length >= 2);
+    let code = if length < 10 {
+        length - 2
+    } else if length < 134 {
+        let nbits = log2_floor_nonzero(length - 6) - 1;
+        (nbits << 1) + ((length - 6) >> nbits) + 4
+    } else if length < 2118 {
+        log2_floor_nonzero(length - 70) + 12
+    } else {
+        23
+    };
+    make_length_code(length, code, &COPY_BASE, &COPY_EXTRA_BITS)
+}
+
+fn make_length_code(
+    length: usize,
+    code: usize,
+    bases: &[usize; 24],
+    extra_bits: &[u8; 24],
+) -> LengthCode {
     LengthCode {
         code,
         extra: (length - bases[code]) as u32,
         extra_bits: extra_bits[code],
     }
+}
+
+fn log2_floor_nonzero(value: usize) -> usize {
+    debug_assert!(value != 0);
+    usize::BITS as usize - 1 - value.leading_zeros() as usize
 }
 
 fn combine_length_codes(insert_code: usize, copy_code: usize, use_last_distance: bool) -> u16 {
@@ -129,7 +163,10 @@ fn write_length_extra(writer: &mut BitWriter, code: LengthCode) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExplicitCommand, InsertCommand};
+    use super::{
+        COPY_BASE, COPY_EXTRA_BITS, ExplicitCommand, INSERT_BASE, INSERT_EXTRA_BITS, InsertCommand,
+        copy_length_code, insert_length_code,
+    };
     use crate::encode::bit_writer::BitWriter;
 
     #[test]
@@ -182,5 +219,25 @@ mod tests {
         let mut writer = BitWriter::default();
         command.write_extra(&mut writer);
         assert_eq!(writer.finish(), [0b0101_0001, 0b0000_0010]);
+    }
+
+    #[test]
+    fn direct_insert_length_codes_cover_reference_ranges() {
+        for length in 0..100_000 {
+            let code = insert_length_code(length);
+            let base = INSERT_BASE[code.code];
+            let range = 1_usize << INSERT_EXTRA_BITS[code.code];
+            assert!(length >= base && length - base < range, "length={length}");
+        }
+    }
+
+    #[test]
+    fn direct_copy_length_codes_cover_reference_ranges() {
+        for length in 2..100_000 {
+            let code = copy_length_code(length);
+            let base = COPY_BASE[code.code];
+            let range = 1_usize << COPY_EXTRA_BITS[code.code];
+            assert!(length >= base && length - base < range, "length={length}");
+        }
     }
 }
