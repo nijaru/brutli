@@ -26,6 +26,10 @@ impl BitWriter {
         }
     }
 
+    pub(super) fn bit_len(&self) -> usize {
+        self.bytes.len() * 8 + usize::from(self.used)
+    }
+
     pub(super) fn align_to_byte(&mut self) {
         if self.used != 0 {
             self.bytes.push(self.current);
@@ -66,6 +70,15 @@ mod tests {
         writer.write_prefix(0b01, 2);
 
         assert_eq!(writer.finish(), vec![0b0001_0011]);
+    }
+
+    #[test]
+    fn reports_unaligned_bit_length() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(0b101, 3);
+        assert_eq!(writer.bit_len(), 3);
+        writer.write_bits(0xff, 8);
+        assert_eq!(writer.bit_len(), 11);
     }
 
     #[test]
