@@ -333,20 +333,24 @@ fn hash4(input: &[u8], position: usize) -> usize {
     ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
 }
 
+#[inline(always)]
 fn read_u32(input: &[u8], position: usize) -> u32 {
-    u32::from_le_bytes(
-        input[position..position + 4]
-            .try_into()
-            .expect("word input has four bytes"),
-    )
+    debug_assert!(position.checked_add(4).is_some_and(|end| end <= input.len()));
+    // SAFETY: all callers ensure that four bytes starting at `position` are
+    // within `input`; `read_unaligned` does not require pointer alignment.
+    unsafe { std::ptr::read_unaligned(input.as_ptr().add(position).cast::<u32>()).to_le() }
 }
 
+#[inline(always)]
 fn read_u64(input: &[u8], position: usize) -> u64 {
-    u64::from_le_bytes(
-        input[position..position + MATCH_WORD_BYTES]
-            .try_into()
-            .expect("word input has eight bytes"),
-    )
+    debug_assert!(
+        position
+            .checked_add(MATCH_WORD_BYTES)
+            .is_some_and(|end| end <= input.len())
+    );
+    // SAFETY: `match_length` only reaches this helper when a full eight-byte
+    // word remains inside both compared ranges; unaligned reads are permitted.
+    unsafe { std::ptr::read_unaligned(input.as_ptr().add(position).cast::<u64>()).to_le() }
 }
 
 pub(super) fn backward_reference_score(copy_length: usize, distance: usize) -> usize {
