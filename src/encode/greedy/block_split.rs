@@ -61,7 +61,7 @@ struct BlockTypeCodeCalculator {
 }
 
 #[derive(Debug)]
-struct GreedyBlockSplitter {
+pub(super) struct GreedyBlockSplitter {
     symbol_alphabet_size: usize,
     context_count: usize,
     min_block_size: usize,
@@ -202,6 +202,22 @@ impl BlockTypeCodeCalculator {
 }
 
 impl GreedyBlockSplitter {
+    pub(super) fn literals(num_symbols: usize) -> Self {
+        Self::new(256, 512, 400.0, num_symbols)
+    }
+
+    pub(super) fn contextual_literals(context_count: usize, num_symbols: usize) -> Self {
+        Self::with_contexts(256, context_count, 512, 400.0, num_symbols)
+    }
+
+    pub(super) fn commands(num_symbols: usize) -> Self {
+        Self::new(704, 1024, 500.0, num_symbols)
+    }
+
+    pub(super) fn distances(alphabet_size: usize, num_symbols: usize) -> Self {
+        Self::new(alphabet_size, 512, 100.0, num_symbols)
+    }
+
     fn new(
         symbol_alphabet_size: usize,
         min_block_size: usize,
@@ -250,11 +266,11 @@ impl GreedyBlockSplitter {
         }
     }
 
-    fn add_symbol(&mut self, symbol: usize) {
+    pub(super) fn add_symbol(&mut self, symbol: usize) {
         self.add_context_symbol(symbol, 0);
     }
 
-    fn add_context_symbol(&mut self, symbol: usize, context: usize) {
+    pub(super) fn add_context_symbol(&mut self, symbol: usize, context: usize) {
         debug_assert!(symbol < self.symbol_alphabet_size);
         debug_assert!(context < self.context_count);
         let composite_symbol = context * self.symbol_alphabet_size + symbol;
@@ -265,7 +281,7 @@ impl GreedyBlockSplitter {
         }
     }
 
-    fn finish(mut self) -> SplitResult {
+    pub(super) fn finish(mut self) -> SplitResult {
         self.finish_block(true);
         self.histograms.truncate(self.split.num_types);
         let histograms = self
@@ -387,7 +403,7 @@ impl GreedyBlockSplitter {
 }
 
 pub(super) fn split_literals(data: &[u8]) -> SplitResult {
-    let mut splitter = GreedyBlockSplitter::new(256, 512, 400.0, data.len());
+    let mut splitter = GreedyBlockSplitter::literals(data.len());
     for &symbol in data {
         splitter.add_symbol(usize::from(symbol));
     }
@@ -395,8 +411,7 @@ pub(super) fn split_literals(data: &[u8]) -> SplitResult {
 }
 
 pub(super) fn split_contextual_literals(data: &[(u8, u8)], context_count: usize) -> SplitResult {
-    let mut splitter =
-        GreedyBlockSplitter::with_contexts(256, context_count, 512, 400.0, data.len());
+    let mut splitter = GreedyBlockSplitter::contextual_literals(context_count, data.len());
     for &(symbol, context) in data {
         splitter.add_context_symbol(usize::from(symbol), usize::from(context));
     }
@@ -404,7 +419,7 @@ pub(super) fn split_contextual_literals(data: &[(u8, u8)], context_count: usize)
 }
 
 pub(super) fn split_commands(data: &[u16]) -> SplitResult {
-    let mut splitter = GreedyBlockSplitter::new(704, 1024, 500.0, data.len());
+    let mut splitter = GreedyBlockSplitter::commands(data.len());
     for &symbol in data {
         splitter.add_symbol(usize::from(symbol));
     }
@@ -412,7 +427,7 @@ pub(super) fn split_commands(data: &[u16]) -> SplitResult {
 }
 
 pub(super) fn split_distances(data: &[u16], alphabet_size: usize) -> SplitResult {
-    let mut splitter = GreedyBlockSplitter::new(alphabet_size, 512, 100.0, data.len());
+    let mut splitter = GreedyBlockSplitter::distances(alphabet_size, data.len());
     for &symbol in data {
         splitter.add_symbol(usize::from(symbol));
     }
