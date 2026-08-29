@@ -213,9 +213,6 @@ fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
 
 #[cfg(feature = "current-google-reference")]
 mod current_google {
-    #[link(name = "brotlienc", kind = "static")]
-    #[link(name = "brotlicommon", kind = "static")]
-    #[link(name = "m")]
     unsafe extern "C" {
         fn BrotliEncoderMaxCompressedSize(input_size: usize) -> usize;
         fn BrotliEncoderCompress(
