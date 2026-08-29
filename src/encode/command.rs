@@ -37,8 +37,8 @@ pub(super) struct ExplicitCommand {
 
 impl InsertCommand {
     pub(super) fn for_length(length: usize) -> Self {
-        let insert = insert_length_code(length);
-        let copy = copy_length_code(4);
+        let insert = get_insert_length_code(length);
+        let copy = get_copy_length_code(4);
         let symbol = combine_length_codes(insert.code, copy.code, false);
         Self {
             symbol,
@@ -67,8 +67,8 @@ impl ExplicitCommand {
         copy_length_code: usize,
         use_last_distance: bool,
     ) -> Self {
-        let insert = insert_length_code(insert_length);
-        let copy = copy_length_code(copy_length_code);
+        let insert = get_insert_length_code(insert_length);
+        let copy = get_copy_length_code(copy_length_code);
         let symbol = combine_length_codes(insert.code, copy.code, use_last_distance);
         Self {
             symbol,
@@ -91,7 +91,7 @@ impl ExplicitCommand {
     }
 }
 
-fn insert_length_code(length: usize) -> LengthCode {
+fn get_insert_length_code(length: usize) -> LengthCode {
     let code = if length < 6 {
         length
     } else if length < 130 {
@@ -109,7 +109,7 @@ fn insert_length_code(length: usize) -> LengthCode {
     make_length_code(length, code, &INSERT_BASE, &INSERT_EXTRA_BITS)
 }
 
-fn copy_length_code(length: usize) -> LengthCode {
+fn get_copy_length_code(length: usize) -> LengthCode {
     debug_assert!(length >= 2);
     let code = if length < 10 {
         length - 2
@@ -165,7 +165,7 @@ fn write_length_extra(writer: &mut BitWriter, code: LengthCode) {
 mod tests {
     use super::{
         COPY_BASE, COPY_EXTRA_BITS, ExplicitCommand, INSERT_BASE, INSERT_EXTRA_BITS, InsertCommand,
-        copy_length_code, insert_length_code,
+        get_copy_length_code, get_insert_length_code,
     };
     use crate::encode::bit_writer::BitWriter;
 
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn direct_insert_length_codes_cover_reference_ranges() {
         for length in 0..100_000 {
-            let code = insert_length_code(length);
+            let code = get_insert_length_code(length);
             let base = INSERT_BASE[code.code];
             let range = 1_usize << INSERT_EXTRA_BITS[code.code];
             assert!(length >= base && length - base < range, "length={length}");
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn direct_copy_length_codes_cover_reference_ranges() {
         for length in 2..100_000 {
-            let code = copy_length_code(length);
+            let code = get_copy_length_code(length);
             let base = COPY_BASE[code.code];
             let range = 1_usize << COPY_EXTRA_BITS[code.code];
             assert!(length >= base && length - base < range, "length={length}");
