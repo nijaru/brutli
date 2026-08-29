@@ -293,18 +293,14 @@ impl GreedyBlockSplitter {
         } else if self.block_size > 0 {
             let current = self.current_histogram;
             let entropy = self.histogram_entropy(&self.histograms[current]);
-            let mut combined = [Vec::new(), Vec::new()];
-            let mut combined_entropy = [0.0_f64; 2];
-            let mut difference = [0.0_f64; 2];
-
-            for index in 0..2 {
-                combined[index] = add_histograms(
-                    &self.histograms[current],
-                    &self.histograms[self.last_histograms[index]],
-                );
-                combined_entropy[index] = self.histogram_entropy(&combined[index]);
-                difference[index] = combined_entropy[index] - entropy - self.last_entropy[index];
-            }
+            let combined_entropy = [
+                self.combined_histogram_entropy(current, self.last_histograms[0]),
+                self.combined_histogram_entropy(current, self.last_histograms[1]),
+            ];
+            let difference = [
+                combined_entropy[0] - entropy - self.last_entropy[0],
+                combined_entropy[1] - entropy - self.last_entropy[1],
+            ];
 
             if self.split.num_types < self.max_block_types
                 && difference[0] > self.split_threshold
@@ -322,10 +318,11 @@ impl GreedyBlockSplitter {
                 self.reset_after_split();
             } else if difference[1] < difference[0] - 20.0 {
                 let second_last_type = self.split.types[self.split.types.len() - 2];
+                let target = self.last_histograms[1];
                 self.split.types.push(second_last_type);
                 self.split.lengths.push(self.block_size);
+                merge_histograms(&mut self.histograms, current, target);
                 self.last_histograms.swap(0, 1);
-                self.histograms[self.last_histograms[0]] = combined[1].clone();
                 self.last_entropy[1] = self.last_entropy[0];
                 self.last_entropy[0] = combined_entropy[1];
                 self.clear_current_histogram();
@@ -336,7 +333,8 @@ impl GreedyBlockSplitter {
                     .lengths
                     .last_mut()
                     .expect("greedy splitter has a previous block") += self.block_size;
-                self.histograms[self.last_histograms[0]] = combined[0].clone();
+                let target = self.last_histograms[0];
+                merge_histograms(&mut self.histograms, current, target);
                 self.last_entropy[0] = combined_entropy[0];
                 if self.split.num_types == 1 {
                     self.last_entropy[1] = self.last_entropy[0];
@@ -359,6 +357,17 @@ impl GreedyBlockSplitter {
         histogram
             .chunks_exact(self.symbol_alphabet_size)
             .map(bits_entropy)
+            .sum()
+    }
+
+    fn combined_histogram_entropy(&self, left: usize, right: usize) -> f64 {
+        self.histograms[left]
+            .chunks_exact(self.symbol_alphabet_size)
+            .zip(
+                self.histograms[right]
+                    .chunks_exact(self.symbol_alphabet_size),
+            )
+            .map(|(left, right)| combined_bits_entropy(left, right))
             .sum()
     }
 
@@ -574,16 +583,47 @@ fn bits_entropy(histogram: &[usize]) -> f64 {
     entropy.max(total as f64)
 }
 
+fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
+    debug_assert_eq!(left.len(), right.len());
+    let total = left
+        .iter()
+        .zip(right)
+        .map(|(&left, &right)| left + right)
+        .sum::<usize>();
+    if total == 0 {
+        return 0.0;
+    }
+    let total_log = fast_log2(total);
+    let mut entropy = 0.0_f64;
+    for (&left, &right) in left.iter().zip(right) {
+        let count = left + right;
+        if count != 0 {
+            entropy += count as f64 * (total_log - fast_log2(count));
+        }
+    }
+    entropy.max(total as f64)
+}
+
+fn merge_histograms(histograms: &mut [Vec<usize>], source: usize, target: usize) {
+    debug_assert_ne!(source, target);
+    let (source_histogram, target_histogram) = if source < target {
+        let (before_target, from_target) = histograms.split_at_mut(target);
+        (&before_target[source], &mut from_target[0])
+    } else {
+        let (before_source, from_source) = histograms.split_at_mut(source);
+        (&from_source[0], &mut before_source[target])
+    };
+    for (target, source) in target_histogram.iter_mut().zip(source_histogram) {
+        *target += *source;
+    }
+}
+
 fn fast_log2(value: usize) -> f64 {
     if value == 0 {
         0.0
     } else {
         (value as f64).log2()
     }
-}
-
-fn add_histograms(left: &[usize], right: &[usize]) -> Vec<usize> {
-    left.iter().zip(right).map(|(&a, &b)| a + b).collect()
 }
 
 fn block_length_code(length: usize) -> BlockLengthCode {
