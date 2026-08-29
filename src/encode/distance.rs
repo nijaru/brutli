@@ -139,7 +139,10 @@ impl DistanceCode {
         let prefix = (dist >> bucket) & 1;
         let offset = (2 + prefix) << bucket;
         let code = 2 * (bucket - 1) + prefix;
-        assert!(code < usize::from(POSTFIX_CODE_COUNT), "distance exceeds the RFC 7932 window range");
+        assert!(
+            code < usize::from(POSTFIX_CODE_COUNT),
+            "distance exceeds the RFC 7932 window range"
+        );
 
         Self {
             symbol: SHORT_CODE_COUNT + direct_codes + code as u16,
@@ -168,7 +171,9 @@ pub(super) const fn alphabet_size(direct_codes: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DistanceCode, POSTFIX_CODE_COUNT, RecentDistances, SHORT_CODE_COUNT, alphabet_size};
+    use super::{
+        DistanceCode, POSTFIX_CODE_COUNT, RecentDistances, SHORT_CODE_COUNT, alphabet_size,
+    };
     use crate::encode::bit_writer::BitWriter;
 
     #[test]
@@ -251,7 +256,10 @@ mod tests {
             for distance in 1..=1_000_000 {
                 let direct = DistanceCode::for_distance(distance, direct_codes);
                 let scanned = reference_distance_code(distance, direct_codes);
-                assert_eq!(direct, scanned, "distance={distance}, direct_codes={direct_codes}");
+                assert_eq!(
+                    direct, scanned,
+                    "distance={distance}, direct_codes={direct_codes}"
+                );
             }
         }
     }
@@ -280,9 +288,7 @@ mod tests {
 
         for code in 0..POSTFIX_CODE_COUNT {
             let bits = 1 + (code >> 1);
-            let base = (((2 + usize::from(code & 1)) << bits) - 4)
-                + usize::from(direct_codes)
-                + 1;
+            let base = (((2 + usize::from(code & 1)) << bits) - 4) + usize::from(direct_codes) + 1;
             let range = 1_usize << bits;
             if distance >= base && distance - base < range {
                 return DistanceCode {
