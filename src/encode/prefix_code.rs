@@ -59,8 +59,7 @@ impl PrefixEncoding {
                 continue;
             }
             if symbol_count < simple_symbols.len() {
-                simple_symbols[symbol_count] =
-                    u16::try_from(symbol).expect("alphabet fits in u16");
+                simple_symbols[symbol_count] = u16::try_from(symbol).expect("alphabet fits in u16");
             }
             symbol_count += 1;
         }
