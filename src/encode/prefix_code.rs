@@ -5,6 +5,7 @@ const CODE_LENGTH_CODE_BITS: usize = 5;
 const INITIAL_REPEATED_CODE_LENGTH: u8 = 8;
 const CODE_LENGTH_ORDER: [u8; 18] = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 const LEAF_SENTINEL: u16 = u16::MAX;
+const HUFFMAN_SHELL_GAPS: [usize; 6] = [132, 57, 23, 10, 4, 1];
 
 #[derive(Debug, Clone, Copy)]
 struct SymbolCode {
@@ -147,11 +148,7 @@ fn huffman_code_lengths_with_limit(frequencies: &[usize], max_code_bits: usize) 
             let frequency = u32::try_from(frequency).expect("Brotli histogram count fits in u32");
             nodes.push(HuffmanNode::leaf(frequency.max(count_limit), symbol));
         }
-        nodes.sort_unstable_by(|left, right| {
-            left.total_count
-                .cmp(&right.total_count)
-                .then_with(|| right.right_or_symbol.cmp(&left.right_or_symbol))
-        });
+        sort_huffman_nodes(&mut nodes);
 
         let leaf_count = nodes.len();
         let mut next_leaf = 0_usize;
@@ -226,6 +223,40 @@ fn take_smallest_node(
         let result = *next_parent;
         *next_parent += 1;
         result
+    }
+}
+
+fn huffman_node_before(left: HuffmanNode, right: HuffmanNode) -> bool {
+    left.total_count < right.total_count
+        || (left.total_count == right.total_count && left.right_or_symbol > right.right_or_symbol)
+}
+
+fn sort_huffman_nodes(nodes: &mut [HuffmanNode]) {
+    let len = nodes.len();
+    if len < 13 {
+        for index in 1..len {
+            let value = nodes[index];
+            let mut slot = index;
+            while slot != 0 && huffman_node_before(value, nodes[slot - 1]) {
+                nodes[slot] = nodes[slot - 1];
+                slot -= 1;
+            }
+            nodes[slot] = value;
+        }
+        return;
+    }
+
+    let first_gap = if len < 57 { 2 } else { 0 };
+    for &gap in &HUFFMAN_SHELL_GAPS[first_gap..] {
+        for index in gap..len {
+            let value = nodes[index];
+            let mut slot = index;
+            while slot >= gap && huffman_node_before(value, nodes[slot - gap]) {
+                nodes[slot] = nodes[slot - gap];
+                slot -= gap;
+            }
+            nodes[slot] = value;
+        }
     }
 }
 
