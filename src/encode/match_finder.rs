@@ -148,9 +148,7 @@ impl QualityFiveHasher {
             let comparison_length = best_length.max(3);
             if comparison_length < max_length {
                 let compare_at = comparison_length - 3;
-                if input[position + compare_at..position + compare_at + 4]
-                    != input[previous + compare_at..previous + compare_at + 4]
-                {
+                if read_u32(input, position + compare_at) != read_u32(input, previous + compare_at) {
                     continue;
                 }
             }
@@ -320,12 +318,24 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {
-    let value = u32::from_le_bytes(
+    let value = read_u32(input, position);
+    ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
+}
+
+fn read_u32(input: &[u8], position: usize) -> u32 {
+    u32::from_le_bytes(
         input[position..position + 4]
             .try_into()
-            .expect("hash input has four bytes"),
-    );
-    ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
+            .expect("word input has four bytes"),
+    )
+}
+
+fn read_u64(input: &[u8], position: usize) -> u64 {
+    u64::from_le_bytes(
+        input[position..position + MATCH_WORD_BYTES]
+            .try_into()
+            .expect("word input has eight bytes"),
+    )
 }
 
 pub(super) fn backward_reference_score(copy_length: usize, distance: usize) -> usize {
@@ -349,10 +359,9 @@ fn log2_floor_nonzero(value: usize) -> usize {
 fn match_length(input: &[u8], previous: usize, current: usize, limit: usize) -> usize {
     let mut length = 0_usize;
     while length + MATCH_WORD_BYTES <= limit {
-        if input[previous + length..previous + length + MATCH_WORD_BYTES]
-            != input[current + length..current + length + MATCH_WORD_BYTES]
-        {
-            break;
+        let difference = read_u64(input, previous + length) ^ read_u64(input, current + length);
+        if difference != 0 {
+            return length + ((difference.trailing_zeros() as usize) >> 3);
         }
         length += MATCH_WORD_BYTES;
     }
@@ -366,7 +375,7 @@ fn match_length(input: &[u8], previous: usize, current: usize, limit: usize) -> 
 mod tests {
     use super::{
         BLOCK_BITS, BLOCK_SIZE, QualityFiveHasher, backward_reference_score,
-        create_backward_references, hash4, score_using_last_distance,
+        create_backward_references, hash4, match_length, score_using_last_distance,
     };
 
     #[test]
@@ -387,6 +396,12 @@ mod tests {
     #[test]
     fn last_distance_gets_reference_score_bonus() {
         assert!(score_using_last_distance(8) > backward_reference_score(8, 4));
+    }
+
+    #[test]
+    fn match_length_finds_difference_inside_word() {
+        let input = b"abcdefghabcxefgh";
+        assert_eq!(match_length(input, 0, 8, 8), 3);
     }
 
     #[test]
