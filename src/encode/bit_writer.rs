@@ -1,8 +1,20 @@
-#[derive(Debug, Default)]
+const INITIAL_CAPACITY: usize = 4096;
+
+#[derive(Debug)]
 pub(super) struct BitWriter {
     bytes: Vec<u8>,
     current: u8,
     used: u8,
+}
+
+impl Default for BitWriter {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::with_capacity(INITIAL_CAPACITY),
+            current: 0,
+            used: 0,
+        }
+    }
 }
 
 impl BitWriter {
