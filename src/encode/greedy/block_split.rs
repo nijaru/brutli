@@ -363,10 +363,7 @@ impl GreedyBlockSplitter {
     fn combined_histogram_entropy(&self, left: usize, right: usize) -> f64 {
         self.histograms[left]
             .chunks_exact(self.symbol_alphabet_size)
-            .zip(
-                self.histograms[right]
-                    .chunks_exact(self.symbol_alphabet_size),
-            )
+            .zip(self.histograms[right].chunks_exact(self.symbol_alphabet_size))
             .map(|(left, right)| combined_bits_entropy(left, right))
             .sum()
     }
