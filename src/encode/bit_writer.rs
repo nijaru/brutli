@@ -6,6 +6,7 @@ pub(super) struct BitWriter {
 }
 
 impl BitWriter {
+    #[inline(always)]
     pub(super) fn write_bits(&mut self, mut value: u64, mut count: u8) {
         if count == 0 {
             return;
@@ -32,6 +33,7 @@ impl BitWriter {
         self.used = count;
     }
 
+    #[inline(always)]
     pub(super) fn write_prefix(&mut self, code: u16, count: u8) {
         if count == 0 {
             return;
@@ -67,6 +69,7 @@ impl BitWriter {
         self.bytes
     }
 
+    #[inline(always)]
     fn flush_word(&mut self) {
         self.bytes.extend_from_slice(&self.pending.to_le_bytes());
         self.pending = 0;
