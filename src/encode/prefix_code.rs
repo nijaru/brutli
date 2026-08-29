@@ -82,8 +82,7 @@ impl PrefixEncoding {
             });
         }
 
-        let lengths =
-            huffman_code_lengths_with_active_count(frequencies, MAX_CODE_BITS, symbol_count);
+        let lengths = huffman_code_lengths(frequencies);
         let codes = canonical_codes(&lengths);
         Some(Self {
             simple_symbols,
@@ -128,26 +127,15 @@ impl PrefixEncoding {
     }
 }
 
+fn huffman_code_lengths(frequencies: &[usize]) -> Vec<u8> {
+    huffman_code_lengths_with_limit(frequencies, MAX_CODE_BITS)
+}
+
 fn huffman_code_lengths_with_limit(frequencies: &[usize], max_code_bits: usize) -> Vec<u8> {
     let active_count = frequencies
         .iter()
         .filter(|&&frequency| frequency != 0)
         .count();
-    huffman_code_lengths_with_active_count(frequencies, max_code_bits, active_count)
-}
-
-fn huffman_code_lengths_with_active_count(
-    frequencies: &[usize],
-    max_code_bits: usize,
-    active_count: usize,
-) -> Vec<u8> {
-    debug_assert_eq!(
-        active_count,
-        frequencies
-            .iter()
-            .filter(|&&frequency| frequency != 0)
-            .count()
-    );
     debug_assert!(active_count != 0);
     debug_assert!(active_count <= 1_usize << max_code_bits);
     debug_assert!(active_count * 2 - 1 < usize::from(LEAF_SENTINEL));
