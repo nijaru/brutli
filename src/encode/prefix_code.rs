@@ -467,7 +467,12 @@ fn code_length_code(frequencies: &[usize; 18]) -> ([u8; 18], [Option<SymbolCode>
     let codes_vec = canonical_codes(&lengths);
     let mut codes = [None; 18];
     codes.copy_from_slice(&codes_vec);
-    if frequencies.iter().filter(|&&frequency| frequency != 0).count() == 1 {
+    if frequencies
+        .iter()
+        .filter(|&&frequency| frequency != 0)
+        .count()
+        == 1
+    {
         let symbol = frequencies
             .iter()
             .position(|&frequency| frequency != 0)
@@ -556,7 +561,7 @@ fn write_code_length_value(writer: &mut BitWriter, value: u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CODE_BITS, CodeLengthToken, PrefixEncoding, balanced_code_lengths,
+        CodeLengthToken, MAX_CODE_BITS, PrefixEncoding, balanced_code_lengths,
         tokenize_code_lengths, write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
     };
     use crate::encode::bit_writer::BitWriter;
@@ -680,17 +685,16 @@ mod tests {
         lengths.resize(64, 0);
         let tokens = tokenize_code_lengths(&lengths);
         assert!(tokens.windows(2).any(|pair| {
-            pair
-                == [
-                    CodeLengthToken {
-                        symbol: 0,
-                        extra: 0,
-                    },
-                    CodeLengthToken {
-                        symbol: 17,
-                        extra: 7,
-                    },
-                ]
+            pair == [
+                CodeLengthToken {
+                    symbol: 0,
+                    extra: 0,
+                },
+                CodeLengthToken {
+                    symbol: 17,
+                    extra: 7,
+                },
+            ]
         }));
     }
 
