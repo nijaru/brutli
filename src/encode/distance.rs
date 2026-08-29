@@ -134,20 +134,18 @@ impl DistanceCode {
             };
         }
 
-        for code in 0..POSTFIX_CODE_COUNT {
-            let bits = 1 + (code >> 1);
-            let base = (((2 + usize::from(code & 1)) << bits) - 4) + usize::from(direct_codes) + 1;
-            let range = 1_usize << bits;
-            if distance >= base && distance - base < range {
-                return Self {
-                    symbol: SHORT_CODE_COUNT + direct_codes + code,
-                    extra: (distance - base) as u32,
-                    extra_bits: bits as u8,
-                };
-            }
-        }
+        let dist = distance + 3 - usize::from(direct_codes);
+        let bucket = log2_floor_nonzero(dist) - 1;
+        let prefix = (dist >> bucket) & 1;
+        let offset = (2 + prefix) << bucket;
+        let code = 2 * (bucket - 1) + prefix;
+        assert!(code < usize::from(POSTFIX_CODE_COUNT), "distance exceeds the RFC 7932 window range");
 
-        panic!("distance exceeds the RFC 7932 window range");
+        Self {
+            symbol: SHORT_CODE_COUNT + direct_codes + code as u16,
+            extra: (dist - offset) as u32,
+            extra_bits: bucket as u8,
+        }
     }
 
     pub(super) const fn extra_bit_count(self) -> u8 {
@@ -159,13 +157,18 @@ impl DistanceCode {
     }
 }
 
+fn log2_floor_nonzero(value: usize) -> usize {
+    debug_assert!(value != 0);
+    usize::BITS as usize - 1 - value.leading_zeros() as usize
+}
+
 pub(super) const fn alphabet_size(direct_codes: u16) -> u16 {
     SHORT_CODE_COUNT + direct_codes + POSTFIX_CODE_COUNT
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DistanceCode, RecentDistances, alphabet_size};
+    use super::{DistanceCode, POSTFIX_CODE_COUNT, RecentDistances, SHORT_CODE_COUNT, alphabet_size};
     use crate::encode::bit_writer::BitWriter;
 
     #[test]
@@ -243,6 +246,17 @@ mod tests {
     }
 
     #[test]
+    fn direct_formula_matches_reference_range_scan() {
+        for direct_codes in [0_u16, 4, 12, 120] {
+            for distance in 1..=1_000_000 {
+                let direct = DistanceCode::for_distance(distance, direct_codes);
+                let scanned = reference_distance_code(distance, direct_codes);
+                assert_eq!(direct, scanned, "distance={distance}, direct_codes={direct_codes}");
+            }
+        }
+    }
+
+    #[test]
     fn reports_distance_extra_bits() {
         assert_eq!(DistanceCode::for_distance(17, 4).extra_bit_count(), 3);
     }
@@ -253,5 +267,32 @@ mod tests {
         let mut writer = BitWriter::default();
         code.write_extra(&mut writer);
         assert!(!writer.finish().is_empty());
+    }
+
+    fn reference_distance_code(distance: usize, direct_codes: u16) -> DistanceCode {
+        if distance <= usize::from(direct_codes) {
+            return DistanceCode {
+                symbol: SHORT_CODE_COUNT + distance as u16 - 1,
+                extra: 0,
+                extra_bits: 0,
+            };
+        }
+
+        for code in 0..POSTFIX_CODE_COUNT {
+            let bits = 1 + (code >> 1);
+            let base = (((2 + usize::from(code & 1)) << bits) - 4)
+                + usize::from(direct_codes)
+                + 1;
+            let range = 1_usize << bits;
+            if distance >= base && distance - base < range {
+                return DistanceCode {
+                    symbol: SHORT_CODE_COUNT + direct_codes + code,
+                    extra: (distance - base) as u32,
+                    extra_bits: bits as u8,
+                };
+            }
+        }
+
+        panic!("distance exceeds the RFC 7932 window range");
     }
 }
