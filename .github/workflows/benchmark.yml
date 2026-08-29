@@ -44,5 +44,9 @@ jobs:
           cmake --build google-brotli/build --target brotlienc brotlicommon --parallel
       - name: Encoder benchmark
         env:
-          RUSTFLAGS: -L native=${{ github.workspace }}/google-brotli/build
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
         run: cargo bench --features current-google-reference --bench encode -- --sample-count 20 --sample-size 1
