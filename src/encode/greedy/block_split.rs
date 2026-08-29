@@ -73,6 +73,7 @@ pub(super) struct GreedyBlockSplitter {
     block_size: usize,
     current_histogram: usize,
     last_histograms: [usize; 2],
+    last_histogram_totals: [usize; 2],
     last_entropy: [f64; 2],
     merge_last_count: usize,
 }
@@ -261,6 +262,7 @@ impl GreedyBlockSplitter {
             block_size: 0,
             current_histogram: 0,
             last_histograms: [0, 0],
+            last_histogram_totals: [0, 0],
             last_entropy: [0.0, 0.0],
             merge_last_count: 0,
         }
@@ -304,11 +306,13 @@ impl GreedyBlockSplitter {
     }
 
     fn finish_block(&mut self, is_final: bool) {
+        let current_total = self.block_size;
         self.block_size = self.block_size.max(self.min_block_size);
         if self.split.types.is_empty() {
             self.split.types.push(0);
             self.split.lengths.push(self.block_size);
-            let entropy = self.histogram_entropy(&self.histograms[0]);
+            let entropy = self.histogram_entropy(&self.histograms[0], current_total);
+            self.last_histogram_totals = [current_total, current_total];
             self.last_entropy = [entropy, entropy];
             self.split.num_types = 1;
             self.current_histogram += 1;
@@ -316,10 +320,22 @@ impl GreedyBlockSplitter {
             self.block_size = 0;
         } else if self.block_size > 0 {
             let current = self.current_histogram;
-            let entropy = self.histogram_entropy(&self.histograms[current]);
+            let entropy = self.histogram_entropy(&self.histograms[current], current_total);
+            let combined_totals = [
+                current_total + self.last_histogram_totals[0],
+                current_total + self.last_histogram_totals[1],
+            ];
             let combined_entropy = [
-                self.combined_histogram_entropy(current, self.last_histograms[0]),
-                self.combined_histogram_entropy(current, self.last_histograms[1]),
+                self.combined_histogram_entropy(
+                    current,
+                    self.last_histograms[0],
+                    combined_totals[0],
+                ),
+                self.combined_histogram_entropy(
+                    current,
+                    self.last_histograms[1],
+                    combined_totals[1],
+                ),
             ];
             let difference = [
                 combined_entropy[0] - entropy - self.last_entropy[0],
@@ -334,6 +350,8 @@ impl GreedyBlockSplitter {
                 self.split.lengths.push(self.block_size);
                 self.last_histograms[1] = self.last_histograms[0];
                 self.last_histograms[0] = self.split.num_types;
+                self.last_histogram_totals[1] = self.last_histogram_totals[0];
+                self.last_histogram_totals[0] = current_total;
                 self.last_entropy[1] = self.last_entropy[0];
                 self.last_entropy[0] = entropy;
                 self.split.num_types += 1;
@@ -347,6 +365,8 @@ impl GreedyBlockSplitter {
                 self.split.lengths.push(self.block_size);
                 merge_histograms(&mut self.histograms, current, target);
                 self.last_histograms.swap(0, 1);
+                self.last_histogram_totals[1] = self.last_histogram_totals[0];
+                self.last_histogram_totals[0] = combined_totals[1];
                 self.last_entropy[1] = self.last_entropy[0];
                 self.last_entropy[0] = combined_entropy[1];
                 self.clear_current_histogram();
@@ -359,8 +379,10 @@ impl GreedyBlockSplitter {
                     .expect("greedy splitter has a previous block") += self.block_size;
                 let target = self.last_histograms[0];
                 merge_histograms(&mut self.histograms, current, target);
+                self.last_histogram_totals[0] = combined_totals[0];
                 self.last_entropy[0] = combined_entropy[0];
                 if self.split.num_types == 1 {
+                    self.last_histogram_totals[1] = self.last_histogram_totals[0];
                     self.last_entropy[1] = self.last_entropy[0];
                 }
                 self.block_size = 0;
@@ -377,19 +399,27 @@ impl GreedyBlockSplitter {
         }
     }
 
-    fn histogram_entropy(&self, histogram: &[usize]) -> f64 {
-        histogram
-            .chunks_exact(self.symbol_alphabet_size)
-            .map(bits_entropy)
-            .sum()
+    fn histogram_entropy(&self, histogram: &[usize], total: usize) -> f64 {
+        if self.context_count == 1 {
+            bits_entropy_with_total(histogram, total)
+        } else {
+            histogram
+                .chunks_exact(self.symbol_alphabet_size)
+                .map(bits_entropy)
+                .sum()
+        }
     }
 
-    fn combined_histogram_entropy(&self, left: usize, right: usize) -> f64 {
-        self.histograms[left]
-            .chunks_exact(self.symbol_alphabet_size)
-            .zip(self.histograms[right].chunks_exact(self.symbol_alphabet_size))
-            .map(|(left, right)| combined_bits_entropy(left, right))
-            .sum()
+    fn combined_histogram_entropy(&self, left: usize, right: usize, total: usize) -> f64 {
+        if self.context_count == 1 {
+            combined_bits_entropy_with_total(&self.histograms[left], &self.histograms[right], total)
+        } else {
+            self.histograms[left]
+                .chunks_exact(self.symbol_alphabet_size)
+                .zip(self.histograms[right].chunks_exact(self.symbol_alphabet_size))
+                .map(|(left, right)| combined_bits_entropy(left, right))
+                .sum()
+        }
     }
 
     fn clear_current_histogram(&mut self) {
@@ -593,7 +623,10 @@ fn run_length_code_zeros(values: &mut Vec<u32>) -> u32 {
 }
 
 fn bits_entropy(histogram: &[usize]) -> f64 {
-    let total = histogram.iter().sum::<usize>();
+    bits_entropy_with_total(histogram, histogram.iter().sum())
+}
+
+fn bits_entropy_with_total(histogram: &[usize], total: usize) -> f64 {
     if total == 0 {
         return 0.0;
     }
@@ -609,12 +642,16 @@ fn bits_entropy(histogram: &[usize]) -> f64 {
 }
 
 fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
-    debug_assert_eq!(left.len(), right.len());
     let total = left
         .iter()
         .zip(right)
         .map(|(&left, &right)| left + right)
         .sum::<usize>();
+    combined_bits_entropy_with_total(left, right, total)
+}
+
+fn combined_bits_entropy_with_total(left: &[usize], right: &[usize], total: usize) -> f64 {
+    debug_assert_eq!(left.len(), right.len());
     if total == 0 {
         return 0.0;
     }
