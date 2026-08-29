@@ -1,7 +1,7 @@
 #[derive(Debug, Default)]
 pub(super) struct BitWriter {
     bytes: Vec<u8>,
-    current: u8,
+    pending: u64,
     used: u8,
 }
 
@@ -10,33 +10,26 @@ impl BitWriter {
         if count == 0 {
             return;
         }
+        debug_assert!(count <= u64::BITS as u8);
 
-        if self.used != 0 {
-            let available = 8 - self.used;
-            let take = count.min(available);
-            let mask = low_mask(take);
-            self.current |= ((value & mask) as u8) << self.used;
-            self.used += take;
-            value >>= take;
-            count -= take;
-
-            if self.used == 8 {
-                self.bytes.push(self.current);
-                self.current = 0;
-                self.used = 0;
+        let total = u16::from(self.used) + u16::from(count);
+        if total <= u64::BITS as u16 {
+            self.pending |= (value & low_mask(count)) << self.used;
+            self.used = total as u8;
+            if self.used == u64::BITS as u8 {
+                self.flush_word();
             }
+            return;
         }
 
-        while count >= 8 {
-            self.bytes.push(value as u8);
-            value >>= 8;
-            count -= 8;
-        }
+        let take = u64::BITS as u8 - self.used;
+        self.pending |= (value & low_mask(take)) << self.used;
+        value >>= take;
+        count -= take;
+        self.flush_word();
 
-        if count != 0 {
-            self.current = (value & low_mask(count)) as u8;
-            self.used = count;
-        }
+        self.pending = value & low_mask(count);
+        self.used = count;
     }
 
     pub(super) fn write_prefix(&mut self, code: u16, count: u8) {
@@ -53,11 +46,15 @@ impl BitWriter {
     }
 
     pub(super) fn align_to_byte(&mut self) {
-        if self.used != 0 {
-            self.bytes.push(self.current);
-            self.current = 0;
-            self.used = 0;
+        if self.used == 0 {
+            return;
         }
+
+        let byte_count = usize::from(self.used.div_ceil(8));
+        let pending = self.pending.to_le_bytes();
+        self.bytes.extend_from_slice(&pending[..byte_count]);
+        self.pending = 0;
+        self.used = 0;
     }
 
     pub(super) fn write_bytes(&mut self, bytes: &[u8]) {
@@ -68,6 +65,12 @@ impl BitWriter {
     pub(super) fn finish(mut self) -> Vec<u8> {
         self.align_to_byte();
         self.bytes
+    }
+
+    fn flush_word(&mut self) {
+        self.bytes.extend_from_slice(&self.pending.to_le_bytes());
+        self.pending = 0;
+        self.used = 0;
     }
 }
 
@@ -113,12 +116,34 @@ mod tests {
     }
 
     #[test]
+    fn packs_across_word_boundaries() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(u64::MAX >> 3, 61);
+        writer.write_bits(0b101_0110, 7);
+
+        let bytes = writer.finish();
+        assert_eq!(bytes.len(), 9);
+        assert_eq!(&bytes[..7], &[0xff; 7]);
+        assert_eq!(bytes[7], 0xdf);
+        assert_eq!(bytes[8], 0x0a);
+    }
+
+    #[test]
     fn reports_unaligned_bit_length() {
         let mut writer = BitWriter::default();
         writer.write_bits(0b101, 3);
         assert_eq!(writer.bit_len(), 3);
         writer.write_bits(0xff, 8);
         assert_eq!(writer.bit_len(), 11);
+    }
+
+    #[test]
+    fn reports_length_after_full_word_flush() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(u64::MAX, 64);
+        assert_eq!(writer.bit_len(), 64);
+        writer.write_bits(0b101, 3);
+        assert_eq!(writer.bit_len(), 67);
     }
 
     #[test]
