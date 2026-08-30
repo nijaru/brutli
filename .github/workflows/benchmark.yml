@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/benchmark.yml
       - Cargo.toml
+      - benches/corpus.rs
       - benches/decode.rs
       - benches/encode.rs
       - "src/decode/**"
@@ -50,3 +51,11 @@ jobs:
             -l static=brotlicommon
             -l m
         run: cargo bench --features current-google-reference --bench encode -- --sample-count 20 --sample-size 1
+      - name: Real corpus benchmark
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: cargo bench --features current-google-reference --bench corpus -- --sample-count 10 --sample-size 1
