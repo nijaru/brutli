@@ -339,7 +339,11 @@ fn prefetch_bucket(buckets: &[MaybeUninit<u32>], offset: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         let pointer = buckets.as_ptr().wrapping_add(offset).cast::<i8>();
-        std::arch::x86_64::_mm_prefetch(pointer, std::arch::x86_64::_MM_HINT_T0);
+        // SAFETY: SSE is part of the x86_64 baseline, and prefetch does not
+        // dereference the pointer.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch(pointer, std::arch::x86_64::_MM_HINT_T0);
+        }
     }
     #[cfg(not(target_arch = "x86_64"))]
     let _ = (buckets, offset);
