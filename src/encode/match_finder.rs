@@ -147,8 +147,15 @@ impl QualityFiveHasher {
         }
 
         let oldest = count.saturating_sub(BLOCK_SIZE);
+        let bucket = self.buckets.as_ptr().wrapping_add(bucket_start);
         for index in (oldest..count).rev() {
-            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
+            // SAFETY: `bucket_start` identifies a complete 16-slot bucket and
+            // `index & BLOCK_MASK` stays within it. The loop visits only slots
+            // below this bucket's stored count, so each position was initialized
+            // before the count was advanced.
+            let previous = unsafe {
+                (*bucket.add(index & BLOCK_MASK)).assume_init() as usize
+            };
             debug_assert!(previous < position);
             let backward = position - previous;
             if backward > max_backward {
