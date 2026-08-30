@@ -5,8 +5,6 @@ use super::static_dictionary::DictionarySearch;
 
 const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
 const BUCKET_BITS: usize = 14;
-const TAG_BITS: usize = 8;
-const TAG_MASK: u32 = (1 << TAG_BITS) - 1;
 const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
 const BLOCK_BITS: usize = 4;
 const BLOCK_SIZE: usize = 1 << BLOCK_BITS;
@@ -61,8 +59,7 @@ impl SearchResult {
 
 #[derive(Debug)]
 struct QualityFiveHasher {
-    num: Vec<u16>,
-    tags: Box<[MaybeUninit<[u8; BLOCK_SIZE]>]>,
+    counts: Vec<u16>,
     buckets: Box<[MaybeUninit<u32>]>,
     dictionary: DictionarySearch,
 }
@@ -70,22 +67,18 @@ struct QualityFiveHasher {
 impl QualityFiveHasher {
     fn new() -> Self {
         Self {
-            num: vec![u16::MAX; BUCKET_COUNT],
-            tags: Box::<[[u8; BLOCK_SIZE]]>::new_uninit_slice(BUCKET_COUNT),
+            counts: vec![0; BUCKET_COUNT],
             buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             dictionary: DictionarySearch::default(),
         }
     }
 
     fn store(&mut self, input: &[u8], position: usize) {
-        let hash = hash_value(input, position);
-        let key = bucket_key(hash);
-        let tag = hash_tag(hash);
-        let num = self.num[key];
-        let ring_index = usize::from(num) & BLOCK_MASK;
-        self.store_tag(key, ring_index, tag);
-        self.buckets[(key << BLOCK_BITS) + ring_index].write(position as u32);
-        self.num[key] = num.wrapping_sub(1);
+        let key = hash4(input, position);
+        let count = usize::from(self.counts[key]);
+        let offset = (key << BLOCK_BITS) + (count & BLOCK_MASK);
+        self.buckets[offset].write(position as u32);
+        self.counts[key] = self.counts[key].wrapping_add(1);
     }
 
     fn store_range(&mut self, input: &[u8], start: usize, end: usize) {
@@ -94,24 +87,11 @@ impl QualityFiveHasher {
         }
     }
 
-    fn store_tag(&mut self, key: usize, ring_index: usize, tag: u8) {
-        if self.num[key] == u16::MAX {
-            let mut bucket = [0_u8; BLOCK_SIZE];
-            bucket[ring_index] = tag;
-            self.tags[key].write(bucket);
-        } else {
-            // SAFETY: `num[key] != u16::MAX` means this bucket was initialized
-            // by its first store. Every later store updates one initialized byte.
-            unsafe {
-                self.tags[key].assume_init_mut()[ring_index] = tag;
-            }
-        }
-    }
-
     fn bucket_position(&self, offset: usize) -> usize {
-        // SAFETY: callers only obtain bucket offsets from tag-mask bits that
-        // correspond to initialized positions. A position and tag are stored
-        // together before the bucket's history counter is advanced.
+        // SAFETY: a bucket slot is read only for indices below `counts[key]`.
+        // Each count increment follows a write to the corresponding ring slot,
+        // so every reachable slot has been initialized. If the u16 count wraps,
+        // all ring slots have necessarily been written many times already.
         unsafe { *self.buckets[offset].assume_init_ref() as usize }
     }
 
@@ -123,10 +103,8 @@ impl QualityFiveHasher {
         max_length: usize,
         max_backward: usize,
     ) -> SearchResult {
-        let hash = hash_value(input, position);
-        let key = bucket_key(hash);
-        let tag = hash_tag(hash);
-        let num = self.num[key];
+        let key = hash4(input, position);
+        let count = usize::from(self.counts[key]);
         let bucket_start = key << BLOCK_BITS;
         let mut result = SearchResult::new();
         let mut best_length = 0_usize;
@@ -168,12 +146,9 @@ impl QualityFiveHasher {
             }
         }
 
-        let head = usize::from(num.wrapping_add(1)) & BLOCK_MASK;
-        let stored = usize::from(u16::MAX.wrapping_sub(num)).min(BLOCK_SIZE);
-        let mut matches = self.matching_tag_mask(key, tag, head, stored);
-        while matches != 0 {
-            let ring_index = (head + matches.trailing_zeros() as usize) & BLOCK_MASK;
-            let previous = self.bucket_position(bucket_start + ring_index);
+        let oldest = count.saturating_sub(BLOCK_SIZE);
+        for index in (oldest..count).rev() {
+            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
             debug_assert!(previous < position);
             let backward = position - previous;
             if backward > max_backward {
@@ -185,7 +160,6 @@ impl QualityFiveHasher {
                 let compare_at = comparison_length - 3;
                 if read_u32(input, position + compare_at) != read_u32(input, previous + compare_at)
                 {
-                    matches &= matches - 1;
                     continue;
                 }
             }
@@ -204,13 +178,11 @@ impl QualityFiveHasher {
                     };
                 }
             }
-            matches &= matches - 1;
         }
 
-        let ring_index = usize::from(self.num[key]) & BLOCK_MASK;
-        self.store_tag(key, ring_index, tag);
-        self.buckets[bucket_start + ring_index].write(position as u32);
-        self.num[key] = self.num[key].wrapping_sub(1);
+        let offset = bucket_start + (count & BLOCK_MASK);
+        self.buckets[offset].write(position as u32);
+        self.counts[key] = self.counts[key].wrapping_add(1);
 
         if result.score == MIN_SCORE
             && let Some(found) = self.dictionary.find(
@@ -230,23 +202,6 @@ impl QualityFiveHasher {
             };
         }
         result
-    }
-
-    fn matching_tag_mask(&self, key: usize, tag: u8, head: usize, stored: usize) -> u16 {
-        if stored == 0 {
-            return 0;
-        }
-        // SAFETY: any non-empty bucket was fully initialized by its first
-        // store, so the 16-byte tag vector is safe to read in one operation.
-        let tags = unsafe { self.tags[key].assume_init_ref() };
-        let physical = physical_tag_mask(tags, tag);
-        let logical = physical.rotate_right(head as u32);
-        let valid = if stored == BLOCK_SIZE {
-            u16::MAX
-        } else {
-            (1_u16 << stored) - 1
-        };
-        logical & valid
     }
 }
 
@@ -373,50 +328,9 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
     }
 }
 
-fn hash_value(input: &[u8], position: usize) -> u32 {
-    let value = read_u32(input, position);
-    value.wrapping_mul(HASH_MULTIPLIER) >> (32 - BUCKET_BITS - TAG_BITS)
-}
-
-fn bucket_key(hash: u32) -> usize {
-    (hash >> TAG_BITS) as usize
-}
-
-fn hash_tag(hash: u32) -> u8 {
-    (hash & TAG_MASK) as u8
-}
-
 fn hash4(input: &[u8], position: usize) -> usize {
-    bucket_key(hash_value(input, position))
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn physical_tag_mask(tags: &[u8; BLOCK_SIZE], tag: u8) -> u16 {
-    use std::arch::x86_64::{
-        __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
-    };
-
-    debug_assert_eq!(BLOCK_SIZE, 16);
-    // SAFETY: x86_64 guarantees SSE2, and `_mm_loadu_si128` permits an
-    // unaligned address. `tags` is a fully initialized 16-byte array.
-    unsafe {
-        let values = _mm_loadu_si128(tags.as_ptr().cast::<__m128i>());
-        let wanted = _mm_set1_epi8(tag as i8);
-        _mm_movemask_epi8(_mm_cmpeq_epi8(values, wanted)) as u16
-    }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn physical_tag_mask(tags: &[u8; BLOCK_SIZE], tag: u8) -> u16 {
-    let mut matches = 0_u16;
-    for (index, &stored_tag) in tags.iter().enumerate() {
-        if stored_tag == tag {
-            matches |= 1_u16 << index;
-        }
-    }
-    matches
+    let value = read_u32(input, position);
+    ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
 }
 
 #[inline(always)]
