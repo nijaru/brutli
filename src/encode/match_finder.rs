@@ -62,7 +62,7 @@ impl SearchResult {
 #[derive(Debug)]
 struct QualityFiveHasher {
     num: Vec<u16>,
-    tags: Box<[MaybeUninit<u8>]>,
+    tags: Box<[u8]>,
     buckets: Box<[MaybeUninit<u32>]>,
     dictionary: DictionarySearch,
 }
@@ -71,7 +71,7 @@ impl QualityFiveHasher {
     fn new() -> Self {
         Self {
             num: vec![u16::MAX; BUCKET_COUNT],
-            tags: Box::<[u8]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
+            tags: vec![0; BUCKET_COUNT * BLOCK_SIZE].into_boxed_slice(),
             buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             dictionary: DictionarySearch::default(),
         }
@@ -81,7 +81,7 @@ impl QualityFiveHasher {
         let (key, tag) = hash4(input, position);
         let offset = (key << BLOCK_BITS) + (usize::from(self.num[key]) & BLOCK_MASK);
         self.buckets[offset].write(position as u32);
-        self.tags[offset].write(tag);
+        self.tags[offset] = tag;
         self.num[key] = self.num[key].wrapping_sub(1);
     }
 
@@ -189,7 +189,7 @@ impl QualityFiveHasher {
 
         let offset = bucket_start + (usize::from(self.num[key]) & BLOCK_MASK);
         self.buckets[offset].write(position as u32);
-        self.tags[offset].write(tag);
+        self.tags[offset] = tag;
         self.num[key] = self.num[key].wrapping_sub(1);
 
         if result.score == MIN_SCORE
@@ -342,42 +342,32 @@ fn hash4(input: &[u8], position: usize) -> (usize, u8) {
     ((hash >> TAG_BITS) as usize, (hash & TAG_MASK) as u8)
 }
 
-fn matching_tag_mask(
-    tags: &[MaybeUninit<u8>],
-    bucket_start: usize,
-    tag: u8,
-    head: usize,
-    stored: usize,
-) -> u16 {
+fn matching_tag_mask(tags: &[u8], bucket_start: usize, tag: u8, head: usize, stored: usize) -> u16 {
     debug_assert!(stored <= BLOCK_SIZE);
-    if stored == BLOCK_SIZE {
-        return full_tag_mask(&tags[bucket_start..bucket_start + BLOCK_SIZE], tag)
-            .rotate_right(head as u32);
+    if stored == 0 {
+        return 0;
     }
 
-    let mut matches = 0_u16;
-    for logical_index in 0..stored {
-        let ring_index = (head + logical_index) & BLOCK_MASK;
-        // SAFETY: `stored` limits reads to tag slots that have been initialized.
-        let stored_tag = unsafe { *tags[bucket_start + ring_index].assume_init_ref() };
-        if stored_tag == tag {
-            matches |= 1_u16 << logical_index;
-        }
-    }
-    matches
+    let logical_matches =
+        full_tag_mask(&tags[bucket_start..bucket_start + BLOCK_SIZE], tag).rotate_right(head as u32);
+    let initialized_mask = if stored == BLOCK_SIZE {
+        u16::MAX
+    } else {
+        (1_u16 << stored) - 1
+    };
+    logical_matches & initialized_mask
 }
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn full_tag_mask(tags: &[MaybeUninit<u8>], tag: u8) -> u16 {
+fn full_tag_mask(tags: &[u8], tag: u8) -> u16 {
     use std::arch::x86_64::{
         __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
     };
 
     debug_assert_eq!(tags.len(), BLOCK_SIZE);
-    // SAFETY: x86-64 guarantees SSE2, `_mm_loadu_si128` permits an unaligned
-    // address, and this helper is called only after all 16 tag slots have been
-    // initialized.
+    // SAFETY: x86-64 guarantees SSE2 and `_mm_loadu_si128` permits an
+    // unaligned address. Tag storage is fully initialized at allocation time.
     unsafe {
         let values = _mm_loadu_si128(tags.as_ptr().cast::<__m128i>());
         let wanted = _mm_set1_epi8(tag as i8);
@@ -387,12 +377,10 @@ fn full_tag_mask(tags: &[MaybeUninit<u8>], tag: u8) -> u16 {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
-fn full_tag_mask(tags: &[MaybeUninit<u8>], tag: u8) -> u16 {
+fn full_tag_mask(tags: &[u8], tag: u8) -> u16 {
     let mut mask = 0_u16;
-    for (index, stored_tag) in tags.iter().enumerate() {
-        // SAFETY: this helper is called only after all 16 tag slots have been
-        // initialized.
-        if unsafe { *stored_tag.assume_init_ref() } == tag {
+    for (index, &stored_tag) in tags.iter().enumerate() {
+        if stored_tag == tag {
             mask |= 1_u16 << index;
         }
     }
@@ -458,8 +446,6 @@ fn match_length(input: &[u8], previous: usize, current: usize, limit: usize) -> 
 
 #[cfg(test)]
 mod tests {
-    use std::mem::MaybeUninit;
-
     use super::{
         BLOCK_BITS, BLOCK_SIZE, QualityFiveHasher, backward_reference_score,
         create_backward_references, full_tag_mask, hash4, match_length, score_using_last_distance,
@@ -485,12 +471,9 @@ mod tests {
 
     #[test]
     fn full_tag_mask_marks_physical_bucket_slots() {
-        let mut tags = [MaybeUninit::<u8>::uninit(); BLOCK_SIZE];
-        for slot in &mut tags {
-            slot.write(0);
-        }
-        tags[3].write(7);
-        tags[11].write(7);
+        let mut tags = [0_u8; BLOCK_SIZE];
+        tags[3] = 7;
+        tags[11] = 7;
 
         assert_eq!(full_tag_mask(&tags, 7), (1_u16 << 3) | (1_u16 << 11));
     }
