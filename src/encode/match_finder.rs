@@ -106,6 +106,7 @@ impl QualityFiveHasher {
         let key = hash4(input, position);
         let count = usize::from(self.counts[key]);
         let bucket_start = key << BLOCK_BITS;
+        prefetch_bucket(&self.buckets, bucket_start);
         let mut result = SearchResult::new();
         let mut best_length = 0_usize;
         let mut best_score = MIN_SCORE;
@@ -331,6 +332,17 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
 fn hash4(input: &[u8], position: usize) -> usize {
     let value = read_u32(input, position);
     ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
+}
+
+#[inline(always)]
+fn prefetch_bucket(buckets: &[MaybeUninit<u32>], offset: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let pointer = buckets.as_ptr().wrapping_add(offset).cast::<i8>();
+        std::arch::x86_64::_mm_prefetch(pointer, std::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (buckets, offset);
 }
 
 #[inline(always)]
