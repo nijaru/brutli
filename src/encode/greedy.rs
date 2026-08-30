@@ -77,27 +77,41 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
 
     let literal_context = choose_q5_literal_context(input);
     let distance_alphabet = alphabet_size(GREEDY_DIRECT_DISTANCE_CODES);
-    let tail_length = input.len() - parse.tail_start;
-    let literal_count = parse
-        .commands
-        .iter()
-        .map(|command| command.insert_length)
-        .sum::<usize>()
-        + tail_length;
-    let command_count = parse.commands.len() + usize::from(tail_length != 0);
-    let distance_count = parse
-        .commands
-        .iter()
-        .filter(|parsed| {
-            ExplicitCommand::for_insert_and_copy_code(
-                parsed.insert_length,
-                parsed.copy_length_code,
-                parsed.distance_code == 0,
-            )
-            .requires_distance()
-        })
-        .count();
+    let tail_start = parse.tail_start;
+    let tail = &input[tail_start..];
+    let tail_command = (!tail.is_empty()).then(|| InsertCommand::for_length(tail.len()));
 
+    let mut literal_count = tail.len();
+    let mut distance_count = 0_usize;
+    let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
+    let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
+    let mut commands = Vec::with_capacity(parse.commands.len());
+    for parsed in parse.commands {
+        let command = ExplicitCommand::for_insert_and_copy_code(
+            parsed.insert_length,
+            parsed.copy_length_code,
+            parsed.distance_code == 0,
+        );
+        let distance = command
+            .requires_distance()
+            .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES));
+        literal_count += parsed.insert_length;
+        command_frequencies[usize::from(command.symbol)] += 1;
+        if let Some(distance) = distance {
+            distance_count += 1;
+            distance_frequencies[usize::from(distance.symbol)] += 1;
+        }
+        commands.push(EncodedMatch {
+            parsed,
+            command,
+            distance,
+        });
+    }
+    if let Some(command) = tail_command {
+        command_frequencies[usize::from(command.symbol)] += 1;
+    }
+
+    let command_count = commands.len() + usize::from(tail_command.is_some());
     let mut literal_splitter = if literal_context.count == 1 {
         GreedyBlockSplitter::literals(literal_count)
     } else {
@@ -108,27 +122,13 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
         GreedyBlockSplitter::distances(usize::from(distance_alphabet), distance_count);
 
     let mut literal_frequencies = vec![0_usize; usize::from(LITERAL_ALPHABET_SIZE)];
-    let mut command_frequencies = vec![0_usize; usize::from(COMMAND_ALPHABET_SIZE)];
-    let mut distance_frequencies = vec![0_usize; usize::from(distance_alphabet)];
-    let mut commands = Vec::with_capacity(parse.commands.len());
-
-    for parsed in parse.commands {
-        let command = ExplicitCommand::for_insert_and_copy_code(
-            parsed.insert_length,
-            parsed.copy_length_code,
-            parsed.distance_code == 0,
-        );
-        let distance = command
-            .requires_distance()
-            .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES));
-        command_frequencies[usize::from(command.symbol)] += 1;
-        command_splitter.add_symbol(usize::from(command.symbol));
-        if let Some(distance) = distance {
-            distance_frequencies[usize::from(distance.symbol)] += 1;
+    for encoded in &commands {
+        command_splitter.add_symbol(usize::from(encoded.command.symbol));
+        if let Some(distance) = encoded.distance {
             distance_splitter.add_symbol(usize::from(distance.symbol));
         }
-        let literal_start = parsed.insert_start;
-        let literal_end = literal_start + parsed.insert_length;
+        let literal_start = encoded.parsed.insert_start;
+        let literal_end = literal_start + encoded.parsed.insert_length;
         collect_literals(
             input,
             literal_start,
@@ -137,30 +137,19 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
             &mut literal_frequencies,
             &mut literal_splitter,
         );
-        commands.push(EncodedMatch {
-            parsed,
-            command,
-            distance,
-        });
     }
 
-    let tail = &input[parse.tail_start..];
-    let tail_command = if tail.is_empty() {
-        None
-    } else {
-        let command = InsertCommand::for_length(tail.len());
-        command_frequencies[usize::from(command.symbol)] += 1;
+    if let Some(command) = tail_command {
         command_splitter.add_symbol(usize::from(command.symbol));
         collect_literals(
             input,
-            parse.tail_start,
+            tail_start,
             input.len(),
             literal_context,
             &mut literal_frequencies,
             &mut literal_splitter,
         );
-        Some(command)
-    };
+    }
     let splits = GreedySplits {
         literal: literal_splitter.finish(),
         command: command_splitter.finish(),
