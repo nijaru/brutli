@@ -120,8 +120,7 @@ impl QualityFiveHasher {
             }
             let previous = position - backward;
             if best_length < max_length
-                && read_byte(input, position + best_length)
-                    != read_byte(input, previous + best_length)
+                && input[position + best_length] != input[previous + best_length]
             {
                 continue;
             }
@@ -332,13 +331,6 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
 fn hash4(input: &[u8], position: usize) -> usize {
     let value = read_u32(input, position);
     ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
-}
-
-#[inline(always)]
-fn read_byte(input: &[u8], position: usize) -> u8 {
-    debug_assert!(position < input.len());
-    // SAFETY: callers establish that `position` is inside the input slice.
-    unsafe { *input.get_unchecked(position) }
 }
 
 #[inline(always)]
