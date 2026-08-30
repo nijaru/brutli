@@ -1,11 +1,5 @@
 use std::mem::MaybeUninit;
 
-use fearless_simd::{
-    Level, Simd, dispatch,
-    prelude::{SimdBase, SimdMask},
-    u8x16,
-};
-
 use super::distance::RecentDistances;
 use super::static_dictionary::DictionarySearch;
 
@@ -373,22 +367,36 @@ fn matching_tag_mask(
     matches
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn full_tag_mask(tags: &[MaybeUninit<u8>], tag: u8) -> u16 {
-    dispatch!(
-        Level::baseline(),
-        simd => full_tag_mask_simd(simd, tags, tag)
-    )
+    use std::arch::x86_64::{
+        __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+    };
+
+    debug_assert_eq!(tags.len(), BLOCK_SIZE);
+    // SAFETY: x86-64 guarantees SSE2, `_mm_loadu_si128` permits an unaligned
+    // address, and this helper is called only after all 16 tag slots have been
+    // initialized.
+    unsafe {
+        let values = _mm_loadu_si128(tags.as_ptr().cast::<__m128i>());
+        let wanted = _mm_set1_epi8(tag as i8);
+        _mm_movemask_epi8(_mm_cmpeq_epi8(values, wanted)) as u16
+    }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
-fn full_tag_mask_simd<S: Simd>(simd: S, tags: &[MaybeUninit<u8>], tag: u8) -> u16 {
-    debug_assert_eq!(tags.len(), BLOCK_SIZE);
-    // SAFETY: this helper is called only for full buckets, so every tag slot
-    // has been initialized. `u8` has no invalid bit patterns.
-    let bucket = unsafe { std::slice::from_raw_parts(tags.as_ptr().cast::<u8>(), BLOCK_SIZE) };
-    let values = u8x16::from_slice(simd, bucket);
-    values.simd_eq(u8x16::splat(simd, tag)).to_bitmask() as u16
+fn full_tag_mask(tags: &[MaybeUninit<u8>], tag: u8) -> u16 {
+    let mut mask = 0_u16;
+    for (index, stored_tag) in tags.iter().enumerate() {
+        // SAFETY: this helper is called only after all 16 tag slots have been
+        // initialized.
+        if unsafe { *stored_tag.assume_init_ref() } == tag {
+            mask |= 1_u16 << index;
+        }
+    }
+    mask
 }
 
 #[inline(always)]
