@@ -2,7 +2,7 @@ use std::mem::MaybeUninit;
 
 use fearless_simd::{
     Level, Simd, dispatch,
-    prelude::{SimdBase, SimdInt, SimdMask},
+    prelude::{SimdBase, SimdMask},
     u8x16,
 };
 
@@ -159,16 +159,23 @@ impl QualityFiveHasher {
 
         let matching_tags = if count >= BLOCK_SIZE {
             full_tag_mask(&self.tags, bucket_start, tag)
+        } else if count == 0 {
+            0
         } else {
-            u16::MAX
+            u16::MAX >> (BLOCK_SIZE - count)
         };
-        let oldest = count.saturating_sub(BLOCK_SIZE);
-        for index in (oldest..count).rev() {
-            let ring_index = index & BLOCK_MASK;
-            if matching_tags & (1_u16 << ring_index) == 0 {
-                continue;
+        let newest = count.wrapping_sub(1) & BLOCK_MASK;
+        let newest_side_mask = u16::MAX >> (BLOCK_MASK - newest);
+        let mut matches = matching_tags & newest_side_mask;
+        let mut wrapped_matches = matching_tags & !newest_side_mask;
+        while matches != 0 || wrapped_matches != 0 {
+            if matches == 0 {
+                matches = wrapped_matches;
+                wrapped_matches = 0;
             }
 
+            let ring_index = (u16::BITS - 1 - matches.leading_zeros()) as usize;
+            matches &= !(1_u16 << ring_index);
             let previous = self.bucket_position(bucket_start + ring_index);
             debug_assert!(previous < position);
             let backward = position - previous;
@@ -383,11 +390,7 @@ fn full_tag_mask_simd<S: Simd>(
         std::slice::from_raw_parts(tags.as_ptr().add(bucket_start).cast::<u8>(), BLOCK_SIZE)
     };
     let values = u8x16::from_slice(simd, bucket);
-    values
-        .simd_eq(u8x16::splat(simd, tag))
-        .to_bitmask()
-        .try_into()
-        .expect("u8x16 mask fits in u16")
+    values.simd_eq(u8x16::splat(simd, tag)).to_bitmask() as u16
 }
 
 #[inline(always)]
