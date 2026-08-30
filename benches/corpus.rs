@@ -37,8 +37,7 @@ static ALICE: LazyLock<Case> = LazyLock::new(|| Case::from_file("alice29.txt"));
 static AS_YOU_LIKE_IT: LazyLock<Case> = LazyLock::new(|| Case::from_file("asyoulik.txt"));
 static LCET10: LazyLock<Case> = LazyLock::new(|| Case::from_file("lcet10.txt"));
 static PARADISE_LOST: LazyLock<Case> = LazyLock::new(|| Case::from_file("plrabn12.txt"));
-static BINAST: LazyLock<Case> =
-    LazyLock::new(|| Case::from_file_prefix("bb.binast", 256 * 1024));
+static BINAST: LazyLock<Case> = LazyLock::new(|| Case::from_file_prefix("bb.binast", 256 * 1024));
 
 fn main() {
     println!("google reference: {GOOGLE_REFERENCE}");
