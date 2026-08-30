@@ -348,8 +348,8 @@ fn matching_tag_mask(tags: &[u8], bucket_start: usize, tag: u8, head: usize, sto
         return 0;
     }
 
-    let logical_matches =
-        full_tag_mask(&tags[bucket_start..bucket_start + BLOCK_SIZE], tag).rotate_right(head as u32);
+    let logical_matches = full_tag_mask(&tags[bucket_start..bucket_start + BLOCK_SIZE], tag)
+        .rotate_right(head as u32);
     let initialized_mask = if stored == BLOCK_SIZE {
         u16::MAX
     } else {
