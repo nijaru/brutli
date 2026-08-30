@@ -12,7 +12,6 @@ const BLOCK_MASK: usize = BLOCK_SIZE - 1;
 const HASH_TYPE_LENGTH: usize = 4;
 const STORE_LOOKAHEAD: usize = 4;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
-const NUM_LAST_DISTANCES_TO_CHECK: usize = 4;
 const LITERAL_BYTE_SCORE: usize = 135;
 const DISTANCE_BIT_PENALTY: usize = 30;
 const SCORE_BASE: usize = DISTANCE_BIT_PENALTY * usize::BITS as usize;
@@ -110,11 +109,7 @@ impl QualityFiveHasher {
         let mut best_length = 0_usize;
         let mut best_score = MIN_SCORE;
 
-        for (index, &backward) in recent_distances
-            .iter()
-            .take(NUM_LAST_DISTANCES_TO_CHECK)
-            .enumerate()
-        {
+        for (index, &backward) in recent_distances.iter().enumerate() {
             if backward == 0 || backward > position || backward > max_backward {
                 continue;
             }
