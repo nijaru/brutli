@@ -5,8 +5,6 @@ use super::static_dictionary::DictionarySearch;
 
 const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
 const BUCKET_BITS: usize = 15;
-const TAG_BITS: usize = 8;
-const TAG_MASK: u32 = (1 << TAG_BITS) - 1;
 const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
 const BLOCK_BITS: usize = 4;
 const BLOCK_SIZE: usize = 1 << BLOCK_BITS;
@@ -62,7 +60,6 @@ impl SearchResult {
 #[derive(Debug)]
 struct QualityFiveHasher {
     counts: Vec<u16>,
-    tags: Box<[MaybeUninit<u8>]>,
     buckets: Box<[MaybeUninit<u32>]>,
     dictionary: DictionarySearch,
 }
@@ -71,17 +68,15 @@ impl QualityFiveHasher {
     fn new() -> Self {
         Self {
             counts: vec![0; BUCKET_COUNT],
-            tags: Box::<[u8]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             dictionary: DictionarySearch::default(),
         }
     }
 
     fn store(&mut self, input: &[u8], position: usize) {
-        let (key, tag) = hash4(input, position);
+        let key = hash4(input, position);
         let count = usize::from(self.counts[key]);
         let offset = (key << BLOCK_BITS) + (count & BLOCK_MASK);
-        self.tags[offset].write(tag);
         self.buckets[offset].write(position as u32);
         self.counts[key] = self.counts[key].wrapping_add(1);
     }
@@ -90,13 +85,6 @@ impl QualityFiveHasher {
         for position in start..end {
             self.store(input, position);
         }
-    }
-
-    fn bucket_tag(&self, offset: usize) -> u8 {
-        // SAFETY: a tag slot is read only for indices below `counts[key]`.
-        // Each count increment follows writes to the corresponding tag and
-        // position slots, so every reachable tag has been initialized.
-        unsafe { *self.tags[offset].assume_init_ref() }
     }
 
     fn bucket_position(&self, offset: usize) -> usize {
@@ -115,7 +103,7 @@ impl QualityFiveHasher {
         max_length: usize,
         max_backward: usize,
     ) -> SearchResult {
-        let (key, tag) = hash4(input, position);
+        let key = hash4(input, position);
         let count = usize::from(self.counts[key]);
         let bucket_start = key << BLOCK_BITS;
         let mut result = SearchResult::new();
@@ -160,11 +148,7 @@ impl QualityFiveHasher {
 
         let oldest = count.saturating_sub(BLOCK_SIZE);
         for index in (oldest..count).rev() {
-            let offset = bucket_start + (index & BLOCK_MASK);
-            if self.bucket_tag(offset) != tag {
-                continue;
-            }
-            let previous = self.bucket_position(offset);
+            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
             debug_assert!(previous < position);
             let backward = position - previous;
             if backward > max_backward {
@@ -197,7 +181,6 @@ impl QualityFiveHasher {
         }
 
         let offset = bucket_start + (count & BLOCK_MASK);
-        self.tags[offset].write(tag);
         self.buckets[offset].write(position as u32);
         self.counts[key] = self.counts[key].wrapping_add(1);
 
@@ -345,12 +328,9 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
     }
 }
 
-fn hash4(input: &[u8], position: usize) -> (usize, u8) {
+fn hash4(input: &[u8], position: usize) -> usize {
     let value = read_u32(input, position);
-    let hash = value.wrapping_mul(HASH_MULTIPLIER);
-    let key = (hash >> (32 - BUCKET_BITS)) as usize;
-    let tag = ((hash >> (32 - BUCKET_BITS - TAG_BITS)) & TAG_MASK) as u8;
-    (key, tag)
+    ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - BUCKET_BITS)) as usize
 }
 
 #[inline(always)]
@@ -425,7 +405,7 @@ mod tests {
             hasher.store(&input, position);
         }
 
-        let (key, _) = hash4(&input, 0);
+        let key = hash4(&input, 0);
         let start = key << BLOCK_BITS;
         let mut positions = (0..BLOCK_SIZE)
             .map(|offset| hasher.bucket_position(start + offset) as u32)
