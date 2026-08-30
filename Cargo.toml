@@ -31,6 +31,10 @@ harness = false
 name = "encode"
 harness = false
 
+[[bench]]
+name = "corpus"
+harness = false
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
