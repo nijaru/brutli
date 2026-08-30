@@ -98,7 +98,7 @@ impl QualityFiveHasher {
     fn find_longest_match(
         &mut self,
         input: &[u8],
-        recent_distances: &[usize; 4],
+        recent_distances: [usize; 4],
         position: usize,
         max_length: usize,
         max_backward: usize,
