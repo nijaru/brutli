@@ -95,6 +95,7 @@ impl QualityFiveHasher {
         unsafe { *self.buckets[offset].assume_init_ref() as usize }
     }
 
+    #[inline(always)]
     fn find_longest_match(
         &mut self,
         input: &[u8],
