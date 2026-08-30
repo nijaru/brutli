@@ -12,6 +12,9 @@ on:
       - "src/decode/**"
       - "src/encode/**"
 
+env:
+  ENCODER_BASELINE_REF: 770e8f80e630227bdfd80053c6246a367b01efd2
+
 permissions:
   contents: read
 
@@ -28,6 +31,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Check out accepted encoder baseline
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.ENCODER_BASELINE_REF }}
+          path: encoder-baseline
       - name: Check out pinned Google Brotli
         uses: actions/checkout@v6
         with:
@@ -43,19 +51,57 @@ jobs:
             -DBROTLI_BUILD_TOOLS=OFF \
             -DCMAKE_BUILD_TYPE=Release
           cmake --build google-brotli/build --target brotlienc brotlicommon --parallel
-      - name: Encoder benchmark
+      - name: Build encoder benchmarks
         env:
           RUSTFLAGS: >-
             -L native=${{ github.workspace }}/google-brotli/build
             -l static=brotlienc
             -l static=brotlicommon
             -l m
-        run: cargo bench --features current-google-reference --bench encode -- --sample-count 20 --sample-size 1
-      - name: Real corpus benchmark
+        run: |
+          cargo bench --manifest-path encoder-baseline/Cargo.toml \
+            --features current-google-reference --bench encode --bench corpus --no-run
+          cargo bench --features current-google-reference \
+            --bench encode --bench corpus --no-run
+      - name: Accepted encoder baseline
         env:
           RUSTFLAGS: >-
             -L native=${{ github.workspace }}/google-brotli/build
             -l static=brotlienc
             -l static=brotlicommon
             -l m
-        run: cargo bench --features current-google-reference --bench corpus -- --sample-count 10 --sample-size 1
+        run: |
+          cargo bench --manifest-path encoder-baseline/Cargo.toml \
+            --features current-google-reference --bench encode -- \
+            --sample-count 20 --sample-size 1
+      - name: Candidate encoder benchmark
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: |
+          cargo bench --features current-google-reference --bench encode -- \
+            --sample-count 20 --sample-size 1
+      - name: Accepted real corpus baseline
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: |
+          cargo bench --manifest-path encoder-baseline/Cargo.toml \
+            --features current-google-reference --bench corpus -- \
+            --sample-count 10 --sample-size 1
+      - name: Candidate real corpus benchmark
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: |
+          cargo bench --features current-google-reference --bench corpus -- \
+            --sample-count 10 --sample-size 1
