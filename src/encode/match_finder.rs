@@ -4,7 +4,7 @@ use super::distance::RecentDistances;
 use super::static_dictionary::DictionarySearch;
 
 const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
-const BUCKET_BITS: usize = 16;
+const BUCKET_BITS: usize = 15;
 const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
 const BLOCK_BITS: usize = 4;
 const BLOCK_SIZE: usize = 1 << BLOCK_BITS;
