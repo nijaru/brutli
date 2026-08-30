@@ -68,7 +68,7 @@ pub(super) struct GreedyBlockSplitter {
     split_threshold: f64,
     max_block_types: usize,
     split: BlockSplit,
-    histograms: Vec<Vec<u32>>,
+    histograms: Vec<Vec<usize>>,
     target_block_size: usize,
     block_size: usize,
     current_histogram: usize,
@@ -257,7 +257,7 @@ impl GreedyBlockSplitter {
                 lengths: Vec::with_capacity(max_num_blocks),
                 num_types: 0,
             },
-            histograms: vec![vec![0_u32; histogram_size]; max_num_types],
+            histograms: vec![vec![0_usize; histogram_size]; max_num_types],
             target_block_size: min_block_size,
             block_size: 0,
             current_histogram: 0,
@@ -288,21 +288,13 @@ impl GreedyBlockSplitter {
         self.histograms.truncate(self.split.num_types);
         let histograms = if self.context_count == 1 {
             self.histograms
-                .into_iter()
-                .map(convert_histogram)
-                .collect()
         } else {
             self.histograms
                 .into_iter()
                 .flat_map(|histogram| {
                     histogram
                         .chunks_exact(self.symbol_alphabet_size)
-                        .map(|histogram| {
-                            histogram
-                                .iter()
-                                .map(|&count| usize::try_from(count).expect("u32 count fits usize"))
-                                .collect::<Vec<_>>()
-                        })
+                        .map(<[usize]>::to_vec)
                         .collect::<Vec<_>>()
                 })
                 .collect()
@@ -407,7 +399,7 @@ impl GreedyBlockSplitter {
         }
     }
 
-    fn histogram_entropy(&self, histogram: &[u32], total: usize) -> f64 {
+    fn histogram_entropy(&self, histogram: &[usize], total: usize) -> f64 {
         if self.context_count == 1 {
             bits_entropy_with_total(histogram, total)
         } else {
@@ -441,13 +433,6 @@ impl GreedyBlockSplitter {
         self.merge_last_count = 0;
         self.target_block_size = self.min_block_size;
     }
-}
-
-fn convert_histogram(histogram: Vec<u32>) -> Vec<usize> {
-    histogram
-        .into_iter()
-        .map(|count| usize::try_from(count).expect("u32 count fits usize"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -637,15 +622,11 @@ fn run_length_code_zeros(values: &mut Vec<u32>) -> u32 {
     max_prefix
 }
 
-fn bits_entropy(histogram: &[u32]) -> f64 {
-    let total = histogram
-        .iter()
-        .map(|&count| usize::try_from(count).expect("u32 count fits usize"))
-        .sum();
-    bits_entropy_with_total(histogram, total)
+fn bits_entropy(histogram: &[usize]) -> f64 {
+    bits_entropy_with_total(histogram, histogram.iter().sum())
 }
 
-fn bits_entropy_with_total(histogram: &[u32], total: usize) -> f64 {
+fn bits_entropy_with_total(histogram: &[usize], total: usize) -> f64 {
     if total == 0 {
         return 0.0;
     }
@@ -654,25 +635,22 @@ fn bits_entropy_with_total(histogram: &[u32], total: usize) -> f64 {
     let mut entropy = 0.0_f64;
     for &count in histogram {
         if count != 0 {
-            let count = usize::try_from(count).expect("u32 count fits usize");
             entropy += count as f64 * (total_log - fast_log2(count, table));
         }
     }
     entropy.max(total as f64)
 }
 
-fn combined_bits_entropy(left: &[u32], right: &[u32]) -> f64 {
+fn combined_bits_entropy(left: &[usize], right: &[usize]) -> f64 {
     let total = left
         .iter()
         .zip(right)
-        .map(|(&left, &right)| {
-            usize::try_from(left + right).expect("combined u32 count fits usize")
-        })
+        .map(|(&left, &right)| left + right)
         .sum::<usize>();
     combined_bits_entropy_with_total(left, right, total)
 }
 
-fn combined_bits_entropy_with_total(left: &[u32], right: &[u32], total: usize) -> f64 {
+fn combined_bits_entropy_with_total(left: &[usize], right: &[usize], total: usize) -> f64 {
     debug_assert_eq!(left.len(), right.len());
     if total == 0 {
         return 0.0;
@@ -683,14 +661,13 @@ fn combined_bits_entropy_with_total(left: &[u32], right: &[u32], total: usize) -
     for (&left, &right) in left.iter().zip(right) {
         let count = left + right;
         if count != 0 {
-            let count = usize::try_from(count).expect("combined u32 count fits usize");
             entropy += count as f64 * (total_log - fast_log2(count, table));
         }
     }
     entropy.max(total as f64)
 }
 
-fn merge_histograms(histograms: &mut [Vec<u32>], source: usize, target: usize) {
+fn merge_histograms(histograms: &mut [Vec<usize>], source: usize, target: usize) {
     debug_assert_ne!(source, target);
     let (source_histogram, target_histogram) = if source < target {
         let (before_target, from_target) = histograms.split_at_mut(target);
