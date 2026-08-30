@@ -544,7 +544,9 @@ fn code_length_code(frequencies: &[usize; 18]) -> ([u8; 18], [Option<SymbolCode>
     let mut lengths = [0_u8; 18];
     lengths.copy_from_slice(&lengths_vec);
 
-    let mut codes = code_length_symbol_codes(&lengths);
+    let codes_vec = canonical_codes(&lengths);
+    let mut codes = [None; 18];
+    codes.copy_from_slice(&codes_vec);
     if frequencies
         .iter()
         .filter(|&&frequency| frequency != 0)
@@ -558,35 +560,6 @@ fn code_length_code(frequencies: &[usize; 18]) -> ([u8; 18], [Option<SymbolCode>
         codes[symbol] = Some(SymbolCode { code: 0, bits: 0 });
     }
     (lengths, codes)
-}
-
-fn code_length_symbol_codes(lengths: &[u8; 18]) -> [Option<SymbolCode>; 18] {
-    let max_bits = usize::from(*lengths.iter().max().unwrap_or(&0));
-    let mut counts = vec![0_u16; max_bits + 1];
-    for &length in lengths {
-        if length != 0 {
-            counts[usize::from(length)] += 1;
-        }
-    }
-
-    let mut next_code = vec![0_u16; max_bits + 1];
-    let mut code = 0_u16;
-    for bits in 1..=max_bits {
-        code = (code + counts[bits - 1]) << 1;
-        next_code[bits] = code;
-    }
-
-    let mut codes = [None; 18];
-    for (symbol, &length) in lengths.iter().enumerate() {
-        if length == 0 {
-            continue;
-        }
-        let bits = usize::from(length);
-        let code = next_code[bits];
-        next_code[bits] += 1;
-        codes[symbol] = Some(SymbolCode { code, bits: length });
-    }
-    codes
 }
 
 fn write_code_length_code(
