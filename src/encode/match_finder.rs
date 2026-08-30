@@ -398,7 +398,7 @@ mod tests {
     };
 
     #[test]
-    fn q5_hasher_keeps_sixteen_most_recent_positions() {
+    fn q5_hasher_keeps_most_recent_positions() {
         let input = vec![b'a'; 64];
         let mut hasher = QualityFiveHasher::new();
         for position in 0..20 {
@@ -411,7 +411,8 @@ mod tests {
             .map(|offset| hasher.bucket_position(start + offset) as u32)
             .collect::<Vec<_>>();
         positions.sort_unstable();
-        assert_eq!(positions, (4_u32..20).collect::<Vec<_>>());
+        let oldest = 20_u32 - BLOCK_SIZE as u32;
+        assert_eq!(positions, (oldest..20).collect::<Vec<_>>());
     }
 
     #[test]
