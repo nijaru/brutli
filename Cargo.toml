@@ -16,7 +16,6 @@ fuzzing = []
 current-google-reference = []
 
 [dependencies]
-fearless_simd = "0.7.0"
 
 [dev-dependencies]
 brotli = "8.0.4"
