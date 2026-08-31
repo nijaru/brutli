@@ -6,81 +6,104 @@ on:
     paths:
       - .github/workflows/benchmark.yml
       - Cargo.toml
+      - benches/corpus.rs
+      - benches/decode.rs
+      - benches/encode.rs
+      - "src/decode/**"
       - "src/encode/**"
+
+env:
+  ENCODER_BASELINE_REF: 5d2099a3a1aaa2437451d39d15c6cf1759e80d8f
 
 permissions:
   contents: read
 
 jobs:
-  encode-profile:
+  decode:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Callgrind
-        run: |
-          if ! command -v valgrind >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y valgrind
-          fi
-          valgrind --version
-      - name: Create structured q5 profile driver
-        run: |
-          mkdir -p examples
-          cat > examples/q5_profile.rs <<'RS'
-          fn main() {
-              let source = structured_binary();
-              let mut total = 0usize;
-              for _ in 0..8 {
-                  total = total.wrapping_add(brutli::compress(&source).len());
-              }
-              println!("source={} compressed_total={total}", source.len());
-          }
+      - name: Decoder benchmark
+        run: cargo bench --bench decode -- --sample-count 20 --sample-size 1
 
-          fn structured_binary() -> Vec<u8> {
-              let mut source = Vec::with_capacity(96 * 1024);
-              let mut state = 0x9e37_79b9_u32;
-              for record in 0_u32..2048 {
-                  source.extend_from_slice(b"BRUT");
-                  source.extend_from_slice(&record.to_le_bytes());
-                  source.extend_from_slice(&(record % 17).to_le_bytes());
-                  source.extend_from_slice(&[0, 0, 1, 0, 0, 0, 0, 1]);
-                  for _ in 0..24 {
-                      state ^= state << 13;
-                      state ^= state >> 17;
-                      state ^= state << 5;
-                      source.push((state & 0xff) as u8);
-                  }
-              }
-              source
-          }
-          RS
-      - name: Build accepted encoder with DWARF v4 line info
+  encode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check out accepted encoder baseline
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.ENCODER_BASELINE_REF }}
+          path: encoder-baseline
+      - name: Check out pinned Google Brotli
+        uses: actions/checkout@v6
+        with:
+          repository: google/brotli
+          ref: 2ff28fb62deeb8c49720acf2c16ecc8f6f7408f1
+          path: google-brotli
+      - name: Link Google corpus into encoder baseline
+        run: ln -s ../google-brotli encoder-baseline/google-brotli
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build pinned Google Brotli
+        run: |
+          cmake -S google-brotli -B google-brotli/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBROTLI_DISABLE_TESTS=ON \
+            -DBROTLI_BUILD_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build google-brotli/build --target brotlienc brotlicommon --parallel
+      - name: Build encoder benchmarks
         env:
-          RUSTFLAGS: -C debuginfo=2 -C dwarf-version=4 -C force-frame-pointers=yes
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
         run: |
-          cargo build --release --example q5_profile
-          echo '=== decoded matcher line table ==='
-          objdump --dwarf=decodedline target/release/examples/q5_profile | grep 'match_finder.rs' | head -n 40 || true
-      - name: Profile structured q5
+          cargo bench --manifest-path encoder-baseline/Cargo.toml \
+            --features current-google-reference --bench encode --bench corpus --no-run
+          cargo bench --features current-google-reference \
+            --bench encode --bench corpus --no-run
+      - name: Accepted encoder baseline
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
         run: |
-          valgrind --tool=callgrind \
-            --cache-sim=yes \
-            --branch-sim=yes \
-            --callgrind-out-file=callgrind.out \
-            ./target/release/examples/q5_profile
-          echo '=== raw matcher mappings ==='
-          grep -E '^(fl|fn|cfl|cfn)=' callgrind.out | grep -E 'match_finder|QualityFiveHasher|bit_writer|BitWriter' | head -n 160 || true
-          echo '=== exclusive function summary ==='
-          callgrind_annotate \
-            --inclusive=no \
-            --show=Ir,D1mr,Bc,Bcm \
-            --threshold=0.02 \
-            callgrind.out | head -n 800
-          echo '=== auto source annotation ==='
-          callgrind_annotate \
-            --inclusive=no \
-            --auto=yes \
-            --show=Ir,D1mr,Bc,Bcm \
-            --threshold=0.005 \
-            callgrind.out | grep -A220 -B20 'match_finder.rs' | head -n 1400 || true
+          cargo bench --manifest-path encoder-baseline/Cargo.toml \
+            --features current-google-reference --bench encode -- \
+            --sample-count 20 --sample-size 1
+      - name: Candidate encoder benchmark
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: |
+          cargo bench --features current-google-reference --bench encode -- \
+            --sample-count 20 --sample-size 1
+      - name: Accepted real corpus baseline
+        working-directory: encoder-baseline
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: |
+          cargo bench --features current-google-reference --bench corpus -- \
+            --sample-count 10 --sample-size 1
+      - name: Candidate real corpus benchmark
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlienc
+            -l static=brotlicommon
+            -l m
+        run: |
+          cargo bench --features current-google-reference --bench corpus -- \
+            --sample-count 10 --sample-size 1
