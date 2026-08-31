@@ -45,6 +45,27 @@ jobs:
       - name: Link Google corpus into encoder baseline
         run: ln -s ../google-brotli encoder-baseline/google-brotli
       - uses: dtolnay/rust-toolchain@stable
+      - name: Apply descending bucket scan candidate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/encode/match_finder.rs")
+          source = path.read_text()
+          old = """        let oldest = count.saturating_sub(BLOCK_SIZE);
+          for index in (oldest..count).rev() {
+              let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
+          """
+          new = """        let oldest = count.saturating_sub(BLOCK_SIZE);
+          let mut index = count;
+          while index > oldest {
+              index -= 1;
+              let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
+          """
+          if old not in source:
+              raise SystemExit("expected q5 bucket scan not found")
+          path.write_text(source.replace(old, new, 1))
+          PY
       - name: Build pinned Google Brotli
         run: |
           cmake -S google-brotli -B google-brotli/build \
