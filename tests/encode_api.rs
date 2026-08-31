@@ -1,0 +1,36 @@
+use brutli::{DecodeError, Decoder, EncodeError, compress, compress_with_window_bits, decompress};
+
+#[test]
+fn default_compression_uses_window_22() {
+    let encoded = compress(b"Brotli data");
+    let mut decoder = Decoder::with_max_window_bits(21);
+    let mut output = [0_u8; 32];
+
+    assert_eq!(
+        decoder.process(&encoded, &mut output),
+        Err(DecodeError::WindowLimitExceeded {
+            window_bits: 22,
+            max_window_bits: 21,
+        })
+    );
+}
+
+#[test]
+fn compression_accepts_all_rfc_window_sizes() {
+    let source = b"abcd".repeat(4096);
+
+    for window_bits in 10..=24 {
+        let encoded = compress_with_window_bits(&source, window_bits).unwrap();
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+}
+
+#[test]
+fn compression_rejects_invalid_window_sizes() {
+    for window_bits in [0, 9, 25, u8::MAX] {
+        assert_eq!(
+            compress_with_window_bits(b"Brotli data", window_bits),
+            Err(EncodeError::InvalidWindowBits { window_bits })
+        );
+    }
+}
