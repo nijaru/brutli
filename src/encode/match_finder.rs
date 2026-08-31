@@ -110,8 +110,8 @@ impl QualityFiveHasher {
         let mut best_length = 0_usize;
         let mut best_score = MIN_SCORE;
 
-        for (index, &backward) in recent_distances
-            .iter()
+        for (index, backward) in recent_distances
+            .into_iter()
             .take(NUM_LAST_DISTANCES_TO_CHECK)
             .enumerate()
         {
