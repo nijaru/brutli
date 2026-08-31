@@ -147,6 +147,13 @@ impl QualityFiveHasher {
         }
 
         let oldest = count.saturating_sub(BLOCK_SIZE);
+        let mut comparison_length = best_length.max(3);
+        let mut compare_at = comparison_length - 3;
+        let mut current_comparison = if comparison_length < max_length {
+            read_u32(input, position + compare_at)
+        } else {
+            0
+        };
         for index in (oldest..count).rev() {
             let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
             debug_assert!(previous < position);
@@ -155,13 +162,10 @@ impl QualityFiveHasher {
                 break;
             }
 
-            let comparison_length = best_length.max(3);
-            if comparison_length < max_length {
-                let compare_at = comparison_length - 3;
-                if read_u32(input, position + compare_at) != read_u32(input, previous + compare_at)
-                {
-                    continue;
-                }
+            if comparison_length < max_length
+                && current_comparison != read_u32(input, previous + compare_at)
+            {
+                continue;
             }
 
             let length = match_length(input, previous, position, max_length);
@@ -170,6 +174,11 @@ impl QualityFiveHasher {
                 if best_score < score {
                     best_score = score;
                     best_length = length;
+                    comparison_length = best_length.max(3);
+                    if comparison_length < max_length {
+                        compare_at = comparison_length - 3;
+                        current_comparison = read_u32(input, position + compare_at);
+                    }
                     result = SearchResult {
                         length,
                         length_code: length,
