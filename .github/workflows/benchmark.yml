@@ -52,16 +52,8 @@ jobs:
 
           path = Path("src/encode/match_finder.rs")
           source = path.read_text()
-          old = """        let oldest = count.saturating_sub(BLOCK_SIZE);
-          for index in (oldest..count).rev() {
-              let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
-          """
-          new = """        let oldest = count.saturating_sub(BLOCK_SIZE);
-          let mut index = count;
-          while index > oldest {
-              index -= 1;
-              let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
-          """
+          old = "        let oldest = count.saturating_sub(BLOCK_SIZE);\n        for index in (oldest..count).rev() {\n            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));\n"
+          new = "        let oldest = count.saturating_sub(BLOCK_SIZE);\n        let mut index = count;\n        while index > oldest {\n            index -= 1;\n            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));\n"
           if old not in source:
               raise SystemExit("expected q5 bucket scan not found")
           path.write_text(source.replace(old, new, 1))
