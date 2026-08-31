@@ -82,9 +82,8 @@ impl QualityFiveHasher {
         let offset = (key << BLOCK_BITS) + head;
         self.buckets[offset].write(position as u32);
         let next_head = (head + 1) & BLOCK_MASK;
-        self.states[key] = next_head as u8
-            | (state & BLOCK_FULL)
-            | u8::from(next_head == 0) * BLOCK_FULL;
+        self.states[key] =
+            next_head as u8 | (state & BLOCK_FULL) | u8::from(next_head == 0) * BLOCK_FULL;
     }
 
     fn store_range(&mut self, input: &[u8], start: usize, end: usize) {
@@ -194,9 +193,8 @@ impl QualityFiveHasher {
         let offset = bucket_start + head;
         self.buckets[offset].write(position as u32);
         let next_head = (head + 1) & BLOCK_MASK;
-        self.states[key] = next_head as u8
-            | (state & BLOCK_FULL)
-            | u8::from(next_head == 0) * BLOCK_FULL;
+        self.states[key] =
+            next_head as u8 | (state & BLOCK_FULL) | u8::from(next_head == 0) * BLOCK_FULL;
 
         if result.score == MIN_SCORE
             && let Some(found) = self.dictionary.find(
