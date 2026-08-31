@@ -1,7 +1,7 @@
 use std::mem::MaybeUninit;
 
 use super::distance::RecentDistances;
-use super::static_dictionary::DictionarySearch;
+use super::static_dictionary::CachedDictionarySearch;
 
 const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
 const BUCKET_BITS: usize = 15;
@@ -61,7 +61,7 @@ impl SearchResult {
 struct QualityFiveHasher {
     counts: Vec<u16>,
     buckets: Box<[MaybeUninit<u32>]>,
-    dictionary: DictionarySearch,
+    dictionary: CachedDictionarySearch,
 }
 
 impl QualityFiveHasher {
@@ -69,7 +69,7 @@ impl QualityFiveHasher {
         Self {
             counts: vec![0; BUCKET_COUNT],
             buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
-            dictionary: DictionarySearch::default(),
+            dictionary: CachedDictionarySearch::default(),
         }
     }
 
