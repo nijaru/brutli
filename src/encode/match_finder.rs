@@ -9,6 +9,8 @@ const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
 const BLOCK_BITS: usize = 4;
 const BLOCK_SIZE: usize = 1 << BLOCK_BITS;
 const BLOCK_MASK: usize = BLOCK_SIZE - 1;
+const BLOCK_HEAD_MASK: u8 = BLOCK_MASK as u8;
+const BLOCK_FULL: u8 = BLOCK_SIZE as u8;
 const HASH_TYPE_LENGTH: usize = 4;
 const STORE_LOOKAHEAD: usize = 4;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
@@ -59,7 +61,7 @@ impl SearchResult {
 
 #[derive(Debug)]
 struct QualityFiveHasher {
-    counts: Vec<u16>,
+    states: Vec<u8>,
     buckets: Box<[MaybeUninit<u32>]>,
     dictionary: DictionarySearch,
 }
@@ -67,7 +69,7 @@ struct QualityFiveHasher {
 impl QualityFiveHasher {
     fn new() -> Self {
         Self {
-            counts: vec![0; BUCKET_COUNT],
+            states: vec![0; BUCKET_COUNT],
             buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             dictionary: DictionarySearch::default(),
         }
@@ -75,10 +77,14 @@ impl QualityFiveHasher {
 
     fn store(&mut self, input: &[u8], position: usize) {
         let key = hash4(input, position);
-        let count = usize::from(self.counts[key]);
-        let offset = (key << BLOCK_BITS) + (count & BLOCK_MASK);
+        let state = self.states[key];
+        let head = usize::from(state & BLOCK_HEAD_MASK);
+        let offset = (key << BLOCK_BITS) + head;
         self.buckets[offset].write(position as u32);
-        self.counts[key] = self.counts[key].wrapping_add(1);
+        let next_head = (head + 1) & BLOCK_MASK;
+        self.states[key] = next_head as u8
+            | (state & BLOCK_FULL)
+            | u8::from(next_head == 0) * BLOCK_FULL;
     }
 
     fn store_range(&mut self, input: &[u8], start: usize, end: usize) {
@@ -88,10 +94,9 @@ impl QualityFiveHasher {
     }
 
     fn bucket_position(&self, offset: usize) -> usize {
-        // SAFETY: a bucket slot is read only for indices below `counts[key]`.
-        // Each count increment follows a write to the corresponding ring slot,
-        // so every reachable slot has been initialized. If the u16 count wraps,
-        // all ring slots have necessarily been written many times already.
+        // SAFETY: a bucket slot is scanned only after its ring state records a
+        // corresponding write. Once a ring becomes full, all slots remain
+        // initialized for the rest of the hasher lifetime.
         unsafe { *self.buckets[offset].assume_init_ref() as usize }
     }
 
@@ -104,7 +109,13 @@ impl QualityFiveHasher {
         max_backward: usize,
     ) -> SearchResult {
         let key = hash4(input, position);
-        let count = usize::from(self.counts[key]);
+        let state = self.states[key];
+        let head = usize::from(state & BLOCK_HEAD_MASK);
+        let stored = if state & BLOCK_FULL != 0 {
+            BLOCK_SIZE
+        } else {
+            head
+        };
         let bucket_start = key << BLOCK_BITS;
         let mut result = SearchResult::new();
         let mut best_length = 0_usize;
@@ -146,9 +157,9 @@ impl QualityFiveHasher {
             }
         }
 
-        let oldest = count.saturating_sub(BLOCK_SIZE);
-        for index in (oldest..count).rev() {
-            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
+        for age in 0..stored {
+            let slot = (head + BLOCK_MASK - age) & BLOCK_MASK;
+            let previous = self.bucket_position(bucket_start + slot);
             debug_assert!(previous < position);
             let backward = position - previous;
             if backward > max_backward {
@@ -180,9 +191,12 @@ impl QualityFiveHasher {
             }
         }
 
-        let offset = bucket_start + (count & BLOCK_MASK);
+        let offset = bucket_start + head;
         self.buckets[offset].write(position as u32);
-        self.counts[key] = self.counts[key].wrapping_add(1);
+        let next_head = (head + 1) & BLOCK_MASK;
+        self.states[key] = next_head as u8
+            | (state & BLOCK_FULL)
+            | u8::from(next_head == 0) * BLOCK_FULL;
 
         if result.score == MIN_SCORE
             && let Some(found) = self.dictionary.find(
