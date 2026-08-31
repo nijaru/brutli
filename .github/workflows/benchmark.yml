@@ -45,19 +45,6 @@ jobs:
       - name: Link Google corpus into encoder baseline
         run: ln -s ../google-brotli encoder-baseline/google-brotli
       - uses: dtolnay/rust-toolchain@stable
-      - name: Apply outlined match length candidate
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/encode/match_finder.rs")
-          source = path.read_text()
-          old = "fn match_length(input: &[u8], previous: usize, current: usize, limit: usize) -> usize {"
-          new = "#[inline(never)]\nfn match_length(input: &[u8], previous: usize, current: usize, limit: usize) -> usize {"
-          if old not in source:
-              raise SystemExit("expected match_length definition not found")
-          path.write_text(source.replace(old, new, 1))
-          PY
       - name: Build pinned Google Brotli
         run: |
           cmake -S google-brotli -B google-brotli/build \
