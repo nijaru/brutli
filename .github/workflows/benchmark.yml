@@ -45,11 +45,6 @@ jobs:
       - name: Link Google corpus into encoder baseline
         run: ln -s ../google-brotli encoder-baseline/google-brotli
       - uses: dtolnay/rust-toolchain@stable
-      - name: Configure q5 16-bit 8-entry ring candidate
-        run: |
-          sed -i 's/const BUCKET_BITS: usize = 15;/const BUCKET_BITS: usize = 16;/' src/encode/match_finder.rs
-          sed -i 's/const BLOCK_BITS: usize = 4;/const BLOCK_BITS: usize = 3;/' src/encode/match_finder.rs
-          grep -E 'const (BUCKET_BITS|BLOCK_BITS|BLOCK_SIZE)' src/encode/match_finder.rs
       - name: Build pinned Google Brotli
         run: |
           cmake -S google-brotli -B google-brotli/build \
