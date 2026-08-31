@@ -45,19 +45,6 @@ jobs:
       - name: Link Google corpus into encoder baseline
         run: ln -s ../google-brotli encoder-baseline/google-brotli
       - uses: dtolnay/rust-toolchain@stable
-      - name: Apply unchecked match tail candidate
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/encode/match_finder.rs")
-          source = path.read_text()
-          old = "    while length < limit && input[previous + length] == input[current + length] {\n        length += 1;\n    }\n"
-          new = "    while length < limit {\n        // SAFETY: `length < limit`, and the current range contains\n        // `limit` bytes. Since `previous < current`, the previous range\n        // contains at least the same number of bytes.\n        let previous_byte = unsafe { *input.get_unchecked(previous + length) };\n        let current_byte = unsafe { *input.get_unchecked(current + length) };\n        if previous_byte != current_byte {\n            break;\n        }\n        length += 1;\n    }\n"
-          if old not in source:
-              raise SystemExit("expected match_length tail not found")
-          path.write_text(source.replace(old, new, 1))
-          PY
       - name: Build pinned Google Brotli
         run: |
           cmake -S google-brotli -B google-brotli/build \
