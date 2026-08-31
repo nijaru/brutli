@@ -45,6 +45,9 @@ jobs:
       - name: Link Google corpus into encoder baseline
         run: ln -s ../google-brotli encoder-baseline/google-brotli
       - uses: dtolnay/rust-toolchain@stable
+      - name: Configure zero-width extra bit suppression candidate
+        run: >-
+          python -c "from pathlib import Path; p=Path('src/encode/command.rs'); s=p.read_text(); old='fn write_length_extra(writer: &mut BitWriter, code: LengthCode) {\n    writer.write_bits(u64::from(code.extra), code.extra_bits);\n}\n'; new='fn write_length_extra(writer: &mut BitWriter, code: LengthCode) {\n    if code.extra_bits != 0 {\n        writer.write_bits(u64::from(code.extra), code.extra_bits);\n    }\n}\n'; assert old in s; p.write_text(s.replace(old, new)); p=Path('src/encode/distance.rs'); s=p.read_text(); old='    pub(super) fn write_extra(self, writer: &mut BitWriter) {\n        writer.write_bits(u64::from(self.extra), self.extra_bits);\n    }\n'; new='    pub(super) fn write_extra(self, writer: &mut BitWriter) {\n        if self.extra_bits != 0 {\n            writer.write_bits(u64::from(self.extra), self.extra_bits);\n        }\n    }\n'; assert old in s; p.write_text(s.replace(old, new))"
       - name: Build pinned Google Brotli
         run: |
           cmake -S google-brotli -B google-brotli/build \
