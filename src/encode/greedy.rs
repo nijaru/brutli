@@ -13,7 +13,7 @@ use super::distance::{DistanceCode, alphabet_size};
 use super::match_finder::{MatchCommand, create_backward_references};
 use super::prefix_code::PrefixEncoding;
 use super::{
-    COMMAND_ALPHABET_SIZE, LITERAL_ALPHABET_SIZE, MAX_META_BLOCK_SIZE,
+    COMMAND_ALPHABET_SIZE, EncoderConfig, LITERAL_ALPHABET_SIZE, MAX_META_BLOCK_SIZE,
     write_final_compressed_header, write_simple_compressed_header, write_window_bits,
 };
 
@@ -50,6 +50,7 @@ struct LiteralContextPlan {
 
 struct EncodingPlan<'a> {
     input: &'a [u8],
+    config: EncoderConfig,
     commands: &'a [EncodedMatch],
     tail: &'a [u8],
     tail_command: Option<InsertCommand>,
@@ -65,12 +66,13 @@ struct GreedySplits {
     distance: SplitResult,
 }
 
-pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
         return None;
     }
 
-    let parse = create_backward_references(input);
+    let parse =
+        create_backward_references(input, config.max_backward_distance(), config.max_distance());
     if parse.commands.is_empty() {
         return None;
     }
@@ -175,6 +177,7 @@ pub(super) fn try_compress(input: &[u8]) -> Option<Vec<u8>> {
     let distance_code = PrefixEncoding::from_frequencies(&distance_frequencies)?;
     let plan = EncodingPlan {
         input,
+        config,
         commands: &commands,
         tail,
         tail_command,
@@ -214,7 +217,7 @@ fn estimate_single_tree_size(
     distance_frequencies: &[usize],
 ) -> usize {
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, super::DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, plan.config.window_bits());
     write_final_compressed_header(&mut writer, plan.input.len());
     write_simple_compressed_header(&mut writer, GREEDY_DIRECT_DISTANCE_CODES);
     literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
@@ -241,7 +244,7 @@ fn estimate_single_tree_size(
 
 fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) -> Vec<u8> {
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, super::DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, plan.config.window_bits());
     write_final_compressed_header(&mut writer, plan.input.len());
     write_simple_compressed_header(&mut writer, GREEDY_DIRECT_DISTANCE_CODES);
     literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
@@ -291,7 +294,7 @@ fn encode_greedy_splits(plan: &EncodingPlan<'_>, splits: GreedySplits) -> Option
     let distance_split = BlockSplitEncoding::new(distance_result.split)?;
 
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, super::DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, plan.config.window_bits());
     write_final_compressed_header(&mut writer, plan.input.len());
     literal_split.write_header(&mut writer);
     command_split.write_header(&mut writer);
@@ -547,15 +550,20 @@ fn write_split_literal_range(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DEFAULT_WINDOW_BITS, EncoderConfig};
     use super::{
         COMPLEX_UTF8_CONTEXT_MAP, SIMPLE_UTF8_CONTEXT_MAP, choose_q5_literal_context, try_compress,
     };
     use crate::decompress;
 
+    fn default_config() -> EncoderConfig {
+        EncoderConfig::new(DEFAULT_WINDOW_BITS).unwrap()
+    }
+
     #[test]
     fn greedy_stream_round_trips_text() {
         let source = b"the quick brown fox jumps over the lazy dog; the quick brown fox jumps over the lazy dog.";
-        let encoded = try_compress(source).unwrap();
+        let encoded = try_compress(source, default_config()).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
@@ -563,14 +571,14 @@ mod tests {
     fn greedy_stream_round_trips_mixed_distances() {
         let source =
             b"alpha beta gamma alpha beta delta alpha beta gamma alpha beta delta".repeat(64);
-        let encoded = try_compress(&source).unwrap();
+        let encoded = try_compress(&source, default_config()).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
     #[test]
     fn implicit_last_distance_round_trips() {
         let source = b"abcdabcdabcd";
-        let encoded = try_compress(source).unwrap();
+        let encoded = try_compress(source, default_config()).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
@@ -578,7 +586,7 @@ mod tests {
     fn q5_block_split_stream_round_trips() {
         let mut source = b"alpha beta gamma delta epsilon zeta eta theta ".repeat(256);
         source.extend(b"function(x){return x*x+17;} const value = 123456789; ".repeat(256));
-        let encoded = try_compress(&source).unwrap();
+        let encoded = try_compress(&source, default_config()).unwrap();
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
@@ -604,7 +612,7 @@ mod tests {
     fn reference_decoder_accepts_greedy_output() {
         let source = b"general greedy LZ77 should interoperate with the Brotli reference decoder. "
             .repeat(128);
-        let encoded = try_compress(&source).unwrap();
+        let encoded = try_compress(&source, default_config()).unwrap();
         let mut decoded = vec![0_u8; source.len() + 1];
         let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
 

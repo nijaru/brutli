@@ -12,8 +12,39 @@ use prefix_code::{
     PrefixEncoding, write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
 };
 
-const DEFAULT_WINDOW_BITS: u8 = 22;
+use crate::EncodeError;
+
+pub(super) const DEFAULT_WINDOW_BITS: u8 = 22;
+const MIN_WINDOW_BITS: u8 = 10;
+const MAX_WINDOW_BITS: u8 = 24;
 const MAX_META_BLOCK_SIZE: usize = 1 << 24;
+const MAX_DISTANCE: usize = 0x3ff_fffc;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EncoderConfig {
+    window_bits: u8,
+}
+
+impl EncoderConfig {
+    fn new(window_bits: u8) -> Result<Self, EncodeError> {
+        if !(MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&window_bits) {
+            return Err(EncodeError::InvalidWindowBits { window_bits });
+        }
+        Ok(Self { window_bits })
+    }
+
+    pub(super) const fn window_bits(self) -> u8 {
+        self.window_bits
+    }
+
+    pub(super) const fn max_backward_distance(self) -> usize {
+        (1 << self.window_bits) - 16
+    }
+
+    pub(super) const fn max_distance(self) -> usize {
+        MAX_DISTANCE
+    }
+}
 const LITERAL_ALPHABET_SIZE: u16 = 256;
 const COMMAND_ALPHABET_SIZE: u16 = 704;
 const BASE_DISTANCE_ALPHABET_SIZE: u16 = 64;
@@ -21,50 +52,63 @@ const DIRECT_DISTANCE_CODES: u16 = 4;
 const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_DISTANCE_CODES;
 
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
+    compress_with_window_bits(input, DEFAULT_WINDOW_BITS)
+        .expect("the default RFC 7932 window bits are valid")
+}
+
+pub(super) fn compress_with_window_bits(
+    input: &[u8],
+    window_bits: u8,
+) -> Result<Vec<u8>, EncodeError> {
+    let config = EncoderConfig::new(window_bits)?;
+    Ok(compress_with_config(input, config))
+}
+
+fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
     if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
-        return compress_stored(input);
+        return compress_stored(input, config);
     }
 
-    if let Some(candidate) = try_periodic_compressed(input) {
-        return choose_against_stored(input, candidate);
+    if let Some(candidate) = try_periodic_compressed(input, config) {
+        return choose_against_stored(input, candidate, config);
     }
 
-    if let Some(candidate) = greedy::try_compress(input) {
+    if let Some(candidate) = greedy::try_compress(input, config) {
         if candidate.len() <= input.len() {
             return candidate;
         }
 
         let mut best = candidate;
-        if let Some(literal) = try_simple_compressed(input)
+        if let Some(literal) = try_simple_compressed(input, config)
             && literal.len() < best.len()
         {
             best = literal;
         }
-        if let Some(literal) = try_general_literal_compressed(input)
+        if let Some(literal) = try_general_literal_compressed(input, config)
             && literal.len() < best.len()
         {
             best = literal;
         }
-        return choose_against_stored(input, best);
+        return choose_against_stored(input, best, config);
     }
 
-    if let Some(candidate) = try_simple_compressed(input) {
-        return choose_against_stored(input, candidate);
+    if let Some(candidate) = try_simple_compressed(input, config) {
+        return choose_against_stored(input, candidate, config);
     }
 
-    if let Some(candidate) = try_general_literal_compressed(input) {
-        return choose_against_stored(input, candidate);
+    if let Some(candidate) = try_general_literal_compressed(input, config) {
+        return choose_against_stored(input, candidate, config);
     }
 
-    compress_stored(input)
+    compress_stored(input, config)
 }
 
-fn choose_against_stored(input: &[u8], candidate: Vec<u8>) -> Vec<u8> {
+fn choose_against_stored(input: &[u8], candidate: Vec<u8>, config: EncoderConfig) -> Vec<u8> {
     if candidate.len() <= input.len() {
         return candidate;
     }
 
-    let stored = compress_stored(input);
+    let stored = compress_stored(input, config);
     if candidate.len() < stored.len() {
         candidate
     } else {
@@ -72,9 +116,9 @@ fn choose_against_stored(input: &[u8], candidate: Vec<u8>) -> Vec<u8> {
     }
 }
 
-fn compress_stored(input: &[u8]) -> Vec<u8> {
+fn compress_stored(input: &[u8], config: EncoderConfig) -> Vec<u8> {
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, config.window_bits());
 
     for chunk in input.chunks(MAX_META_BLOCK_SIZE) {
         write_uncompressed_metablock(&mut writer, chunk);
@@ -84,7 +128,7 @@ fn compress_stored(input: &[u8]) -> Vec<u8> {
     writer.finish()
 }
 
-fn try_simple_compressed(input: &[u8]) -> Option<Vec<u8>> {
+fn try_simple_compressed(input: &[u8], config: EncoderConfig) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
         return None;
     }
@@ -93,7 +137,7 @@ fn try_simple_compressed(input: &[u8]) -> Option<Vec<u8>> {
     let command = InsertCommand::for_length(input.len());
 
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, config.window_bits());
     write_final_compressed_header(&mut writer, input.len());
     write_simple_compressed_header(&mut writer, 0);
 
@@ -107,7 +151,7 @@ fn try_simple_compressed(input: &[u8]) -> Option<Vec<u8>> {
     Some(writer.finish())
 }
 
-fn try_general_literal_compressed(input: &[u8]) -> Option<Vec<u8>> {
+fn try_general_literal_compressed(input: &[u8], config: EncoderConfig) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
         return None;
     }
@@ -132,7 +176,7 @@ fn try_general_literal_compressed(input: &[u8]) -> Option<Vec<u8>> {
     let command = InsertCommand::for_length(input.len());
 
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, config.window_bits());
     write_final_compressed_header(&mut writer, input.len());
     write_simple_compressed_header(&mut writer, 0);
 
@@ -148,7 +192,7 @@ fn try_general_literal_compressed(input: &[u8]) -> Option<Vec<u8>> {
     Some(writer.finish())
 }
 
-fn try_periodic_compressed(input: &[u8]) -> Option<Vec<u8>> {
+fn try_periodic_compressed(input: &[u8], config: EncoderConfig) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
         return None;
     }
@@ -160,7 +204,7 @@ fn try_periodic_compressed(input: &[u8]) -> Option<Vec<u8>> {
     let distance_symbol = 15 + period as u16;
 
     let mut writer = BitWriter::default();
-    write_window_bits(&mut writer, DEFAULT_WINDOW_BITS);
+    write_window_bits(&mut writer, config.window_bits());
     write_final_compressed_header(&mut writer, input.len());
     write_simple_compressed_header(&mut writer, DIRECT_DISTANCE_CODES);
 
@@ -297,11 +341,15 @@ fn nibbles_for_length(length: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_META_BLOCK_SIZE, compress, compress_stored, nibbles_for_length, periodic_prefix_length,
-        simple_literal_alphabet, try_general_literal_compressed, try_periodic_compressed,
-        try_simple_compressed,
+        DEFAULT_WINDOW_BITS, EncoderConfig, MAX_META_BLOCK_SIZE, compress, compress_stored,
+        nibbles_for_length, periodic_prefix_length, simple_literal_alphabet,
+        try_general_literal_compressed, try_periodic_compressed, try_simple_compressed,
     };
-    use crate::{DecodeError, Decoder, decompress};
+    use crate::{DecodeError, Decoder, compress_with_window_bits, decompress};
+
+    fn default_config() -> EncoderConfig {
+        EncoderConfig::new(DEFAULT_WINDOW_BITS).unwrap()
+    }
 
     #[test]
     fn empty_stream_round_trips() {
@@ -324,25 +372,25 @@ mod tests {
             b"abcabcabcabcabca".as_slice(),
             b"abcdabcdabcdabcd".as_slice(),
         ] {
-            let encoded = try_simple_compressed(source).unwrap();
+            let encoded = try_simple_compressed(source, default_config()).unwrap();
             assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
-            assert!(encoded.len() < compress_stored(source).len());
+            assert!(encoded.len() < compress_stored(source, default_config()).len());
         }
     }
 
     #[test]
     fn complex_literal_stream_round_trips() {
         let source = b"the quick brown fox jumps over the lazy dog. ".repeat(256);
-        let encoded = try_general_literal_compressed(&source).unwrap();
+        let encoded = try_general_literal_compressed(&source, default_config()).unwrap();
 
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
-        assert!(encoded.len() < compress_stored(&source).len());
+        assert!(encoded.len() < compress_stored(&source, default_config()).len());
     }
 
     #[test]
     fn reference_decoder_accepts_complex_literal_output() {
         let source = b"complex canonical literal trees interoperate with Brotli. ".repeat(256);
-        let encoded = try_general_literal_compressed(&source).unwrap();
+        let encoded = try_general_literal_compressed(&source, default_config()).unwrap();
         let mut decoded = vec![0_u8; source.len() + 1];
         let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
 
@@ -362,7 +410,7 @@ mod tests {
             b"abcabcabcabcabca".as_slice(),
             b"abcdabcdabcdabcd".as_slice(),
         ] {
-            let encoded = try_periodic_compressed(source).unwrap();
+            let encoded = try_periodic_compressed(source, default_config()).unwrap();
             assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
         }
     }
@@ -370,8 +418,8 @@ mod tests {
     #[test]
     fn periodic_copy_beats_literal_only_on_long_patterns() {
         let source = b"abcd".repeat(4096);
-        let periodic = try_periodic_compressed(&source).unwrap();
-        let literals = try_simple_compressed(&source).unwrap();
+        let periodic = try_periodic_compressed(&source, default_config()).unwrap();
+        let literals = try_simple_compressed(&source, default_config()).unwrap();
         assert!(periodic.len() < literals.len());
     }
 
@@ -409,7 +457,7 @@ mod tests {
     #[test]
     fn stored_encoder_crosses_four_nibble_length_boundary() {
         let source = vec![0xa5; 0x1_0001];
-        let encoded = compress_stored(&source);
+        let encoded = compress_stored(&source, default_config());
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 
@@ -434,6 +482,40 @@ mod tests {
                 max_window_bits: 21,
             })
         );
+    }
+
+    #[test]
+    fn configurable_stream_uses_every_rfc_window_size() {
+        let source = b"abcd".repeat(4096);
+        for window_bits in 10..=24 {
+            let encoded = compress_with_window_bits(&source, window_bits).unwrap();
+            assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+
+            let mut decoder = Decoder::with_max_window_bits(window_bits - 1);
+            let mut output = vec![0_u8; source.len()];
+            assert_eq!(
+                decoder.process(&encoded, &mut output),
+                Err(DecodeError::WindowLimitExceeded {
+                    window_bits,
+                    max_window_bits: window_bits - 1,
+                })
+            );
+        }
+
+        for window_bits in 10..=24 {
+            let encoded = compress_with_window_bits(b"time and more", window_bits).unwrap();
+            assert_eq!(decompress(&encoded, 13).unwrap(), b"time and more");
+        }
+    }
+
+    #[test]
+    fn configurable_stream_rejects_invalid_window_sizes() {
+        for window_bits in [0, 9, 25, u8::MAX] {
+            assert_eq!(
+                compress_with_window_bits(b"input", window_bits),
+                Err(crate::EncodeError::InvalidWindowBits { window_bits })
+            );
+        }
     }
 
     #[test]

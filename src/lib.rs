@@ -222,14 +222,48 @@ impl Decoder {
     }
 }
 
-/// Encodes one complete RFC 7932 Brotli stream.
+/// Errors reported while encoding a Brotli stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EncodeError {
+    /// The requested `WBITS` value is outside the RFC 7932 range `10..=24`.
+    InvalidWindowBits {
+        /// The rejected `WBITS` value.
+        window_bits: u8,
+    },
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidWindowBits { window_bits } => write!(
+                formatter,
+                "RFC 7932 window bits must be in 10..=24, got {window_bits}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+/// Encodes one complete RFC 7932 Brotli stream with the default `WBITS=22`.
 ///
 /// The current one-shot encoder uses a fast greedy LZ77 parse, canonical prefix
 /// codes, specialized short-period handling, and stored-block fallback for
-/// incompressible data. It does not expose quality controls yet.
+/// incompressible data. Use [`compress_with_window_bits`] to select another
+/// RFC 7932 window size.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     encode::compress(input)
+}
+
+/// Encodes one complete RFC 7932 Brotli stream with a selected window size.
+///
+/// `window_bits` must be in the RFC 7932 range `10..=24`. The window size is
+/// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder; quality,
+/// mode, and streaming controls are not exposed yet.
+pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8>, EncodeError> {
+    encode::compress_with_window_bits(input, window_bits)
 }
 
 /// Decompresses one complete Brotli stream into a `Vec<u8>`.

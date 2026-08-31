@@ -11,7 +11,6 @@ const BLOCK_SIZE: usize = 1 << BLOCK_BITS;
 const BLOCK_MASK: usize = BLOCK_SIZE - 1;
 const HASH_TYPE_LENGTH: usize = 4;
 const STORE_LOOKAHEAD: usize = 4;
-const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
 const LITERAL_BYTE_SCORE: usize = 135;
 const DISTANCE_BIT_PENALTY: usize = 30;
 const SCORE_BASE: usize = DISTANCE_BIT_PENALTY * usize::BITS as usize;
@@ -101,6 +100,7 @@ impl QualityFiveHasher {
         position: usize,
         max_length: usize,
         max_backward: usize,
+        max_distance: usize,
     ) -> SearchResult {
         let key = hash4(input, position);
         let count = usize::from(self.counts[key]);
@@ -190,7 +190,7 @@ impl QualityFiveHasher {
                 position,
                 max_length,
                 max_backward,
-                MAX_BACKWARD_DISTANCE,
+                max_distance,
                 MIN_SCORE,
             )
         {
@@ -205,7 +205,11 @@ impl QualityFiveHasher {
     }
 }
 
-pub(super) fn create_backward_references(input: &[u8]) -> Parse {
+pub(super) fn create_backward_references(
+    input: &[u8],
+    max_backward_distance: usize,
+    max_distance: usize,
+) -> Parse {
     assert!(
         u32::try_from(input.len()).is_ok(),
         "match input exceeds u32 position range"
@@ -233,26 +237,28 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
     let mut apply_random_heuristics = RANDOM_HEURISTICS_WINDOW;
 
     while position + HASH_TYPE_LENGTH < end {
-        let max_backward = position.min(MAX_BACKWARD_DISTANCE);
+        let max_backward = position.min(max_backward_distance);
         let mut result = hasher.find_longest_match(
             input,
             recent_distances.values(),
             position,
             end - position,
             max_backward,
+            max_distance,
         );
 
         if result.score > MIN_SCORE {
             let mut delayed = 0_usize;
             loop {
                 let next_position = position + 1;
-                let next_max_backward = next_position.min(MAX_BACKWARD_DISTANCE);
+                let next_max_backward = next_position.min(max_backward_distance);
                 let next = hasher.find_longest_match(
                     input,
                     recent_distances.values(),
                     next_position,
                     end - next_position,
                     next_max_backward,
+                    max_distance,
                 );
                 if next.score >= result.score + LAZY_SCORE_DELTA {
                     position = next_position;
@@ -269,7 +275,7 @@ pub(super) fn create_backward_references(input: &[u8]) -> Parse {
             apply_random_heuristics = position
                 .saturating_add(2 * result.length)
                 .saturating_add(RANDOM_HEURISTICS_WINDOW);
-            let max_backward = position.min(MAX_BACKWARD_DISTANCE);
+            let max_backward = position.min(max_backward_distance);
             let distance_code = recent_distances.compute_code(result.distance, max_backward);
             if result.distance <= max_backward && distance_code != 0 {
                 recent_distances.push(result.distance);
@@ -396,6 +402,12 @@ mod tests {
         BLOCK_BITS, BLOCK_SIZE, QualityFiveHasher, backward_reference_score,
         create_backward_references, hash4, match_length, score_using_last_distance,
     };
+    use crate::encode::{DEFAULT_WINDOW_BITS, EncoderConfig};
+
+    fn default_limits() -> (usize, usize) {
+        let config = EncoderConfig::new(DEFAULT_WINDOW_BITS).unwrap();
+        (config.max_backward_distance(), config.max_distance())
+    }
 
     #[test]
     fn q5_hasher_keeps_most_recent_positions() {
@@ -428,7 +440,8 @@ mod tests {
 
     #[test]
     fn initial_last_distance_is_encoded_implicitly() {
-        let parse = create_backward_references(b"abcdabcdabcd");
+        let (max_backward, max_distance) = default_limits();
+        let parse = create_backward_references(b"abcdabcdabcd", max_backward, max_distance);
         let first = parse.commands[0];
         assert_eq!(first.insert_length, 4);
         assert_eq!(first.distance, 4);
@@ -439,7 +452,8 @@ mod tests {
 
     #[test]
     fn dictionary_match_keeps_reference_length_code() {
-        let parse = create_backward_references(b"time and more");
+        let (max_backward, max_distance) = default_limits();
+        let parse = create_backward_references(b"time and more", max_backward, max_distance);
         let first = parse.commands[0];
         assert_eq!(first.insert_length, 0);
         assert_eq!(first.copy_length, 4);
@@ -449,7 +463,8 @@ mod tests {
 
     #[test]
     fn incompressible_input_remains_literal_tail() {
-        let parse = create_backward_references(b"abcdefghijklmno");
+        let (max_backward, max_distance) = default_limits();
+        let parse = create_backward_references(b"abcdefghijklmno", max_backward, max_distance);
         assert!(parse.commands.is_empty());
         assert_eq!(parse.tail_start, 0);
     }

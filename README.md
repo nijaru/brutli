@@ -76,11 +76,16 @@ Using `BufRead` lets the adapter stop exactly at the end of the first Brotli str
 
 ## Current encoder
 
-The public encoder is currently a one-shot API:
+The public encoder is currently a one-shot API. The default uses `WBITS=22`:
 
 ```rust
 let compressed = brutli::compress(b"Brotli data");
+let smaller_window = brutli::compress_with_window_bits(b"Brotli data", 16)?;
+# Ok::<(), brutli::EncodeError>(())
 ```
+
+`compress_with_window_bits` accepts the RFC 7932 range `10..=24` and returns
+`EncodeError` for invalid values.
 
 Its current baseline includes:
 
@@ -94,7 +99,7 @@ Its current baseline includes:
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-The encoder deliberately does not expose quality levels yet. Literal context modeling, block splitting, static-dictionary references, deeper parsing, and other ratio/quality heuristics should be added only after broader corpus measurements justify them.
+The encoder deliberately does not expose quality levels, modes, or streaming operations yet. Its current parser is a single greedy strategy; deeper quality-specific parsing and complete upstream parameter behavior remain future RFC 7932 work.
 
 ## Goals
 
