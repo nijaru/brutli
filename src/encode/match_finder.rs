@@ -12,7 +12,6 @@ const BLOCK_MASK: usize = BLOCK_SIZE - 1;
 const HASH_TYPE_LENGTH: usize = 4;
 const STORE_LOOKAHEAD: usize = 4;
 const MAX_BACKWARD_DISTANCE: usize = (1 << 22) - 16;
-const NUM_LAST_DISTANCES_TO_CHECK: usize = 4;
 const LITERAL_BYTE_SCORE: usize = 135;
 const DISTANCE_BIT_PENALTY: usize = 30;
 const SCORE_BASE: usize = DISTANCE_BIT_PENALTY * usize::BITS as usize;
@@ -110,41 +109,42 @@ impl QualityFiveHasher {
         let mut best_length = 0_usize;
         let mut best_score = MIN_SCORE;
 
-        for (index, &backward) in recent_distances
-            .iter()
-            .take(NUM_LAST_DISTANCES_TO_CHECK)
-            .enumerate()
-        {
-            if backward == 0 || backward > position || backward > max_backward {
-                continue;
-            }
-            let previous = position - backward;
-            if best_length < max_length
-                && input[position + best_length] != input[previous + best_length]
-            {
-                continue;
-            }
-
-            let length = match_length(input, previous, position, max_length);
-            if length >= 3 || (length == 2 && index < 2) {
-                let mut score = score_using_last_distance(length);
-                if best_score < score {
-                    if index != 0 {
-                        score = score.saturating_sub(last_distance_penalty(index));
-                    }
-                    if best_score < score {
-                        best_score = score;
-                        best_length = length;
-                        result = SearchResult {
-                            length,
-                            length_code: length,
-                            distance: backward,
-                            score,
-                        };
+        macro_rules! check_recent_distance {
+            ($index:literal) => {{
+                let backward = recent_distances[$index];
+                if backward != 0 && backward <= position && backward <= max_backward {
+                    let previous = position - backward;
+                    if best_length >= max_length
+                        || input[position + best_length] == input[previous + best_length]
+                    {
+                        let length = match_length(input, previous, position, max_length);
+                        if length >= 3 || (length == 2 && $index < 2) {
+                            let mut score = score_using_last_distance(length);
+                            if best_score < score {
+                                if $index != 0 {
+                                    score = score.saturating_sub(last_distance_penalty($index));
+                                }
+                                if best_score < score {
+                                    best_score = score;
+                                    best_length = length;
+                                    result = SearchResult {
+                                        length,
+                                        length_code: length,
+                                        distance: backward,
+                                        score,
+                                    };
+                                }
+                            }
+                        }
                     }
                 }
-            }
+            }};
         }
+
+        check_recent_distance!(0);
+        check_recent_distance!(1);
+        check_recent_distance!(2);
+        check_recent_distance!(3);
 
         let oldest = count.saturating_sub(BLOCK_SIZE);
         for index in (oldest..count).rev() {
