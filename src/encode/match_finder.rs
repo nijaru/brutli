@@ -59,7 +59,7 @@ impl SearchResult {
 
 #[derive(Debug)]
 struct QualityFiveHasher {
-    counts: Vec<u16>,
+    counts: Box<[u16]>,
     buckets: Box<[MaybeUninit<u32>]>,
     dictionary: DictionarySearch,
 }
@@ -67,7 +67,7 @@ struct QualityFiveHasher {
 impl QualityFiveHasher {
     fn new() -> Self {
         Self {
-            counts: vec![0; BUCKET_COUNT],
+            counts: vec![0; BUCKET_COUNT].into_boxed_slice(),
             buckets: Box::<[u32]>::new_uninit_slice(BUCKET_COUNT * BLOCK_SIZE),
             dictionary: DictionarySearch::default(),
         }
