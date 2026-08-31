@@ -45,6 +45,9 @@ jobs:
       - name: Link Google corpus into encoder baseline
         run: ln -s ../google-brotli encoder-baseline/google-brotli
       - uses: dtolnay/rust-toolchain@stable
+      - name: Configure branchless bit mask candidate
+        run: >-
+          python -c "from pathlib import Path; p=Path('src/encode/bit_writer.rs'); s=p.read_text(); old='const fn low_mask(bits: u8) -> u64 {\n    if bits == 64 {\n        u64::MAX\n    } else {\n        (1_u64 << bits) - 1\n    }\n}\n'; new='const fn low_mask(bits: u8) -> u64 {\n    u64::MAX >> (u64::BITS as u8 - bits)\n}\n'; assert old in s; p.write_text(s.replace(old, new))"
       - name: Build pinned Google Brotli
         run: |
           cmake -S google-brotli -B google-brotli/build \
