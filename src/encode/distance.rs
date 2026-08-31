@@ -26,8 +26,8 @@ impl Default for RecentDistances {
 }
 
 impl RecentDistances {
-    pub(super) const fn values(&self) -> &[usize; 4] {
-        &self.values
+    pub(super) const fn values(&self) -> [usize; 4] {
+        self.values
     }
 
     pub(super) fn compute_code(&self, distance: usize, max_distance: usize) -> usize {
