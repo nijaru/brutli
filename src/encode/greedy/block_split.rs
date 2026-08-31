@@ -44,7 +44,6 @@ pub(super) struct BlockCursor<'a> {
     encoding: &'a BlockSplitEncoding,
     block_index: usize,
     remaining: usize,
-    current_type: usize,
     type_calculator: BlockTypeCodeCalculator,
 }
 
@@ -143,7 +142,6 @@ impl BlockSplitEncoding {
             encoding: self,
             block_index: 0,
             remaining: self.split.lengths[0],
-            current_type: usize::from(self.split.types[0]),
             type_calculator,
         }
     }
@@ -158,7 +156,6 @@ impl BlockCursor<'_> {
         if self.remaining == 0 {
             self.block_index += 1;
             let block_type = self.encoding.split.types[self.block_index];
-            self.current_type = usize::from(block_type);
             let type_symbol = self.type_calculator.next(block_type);
             self.encoding
                 .type_code
@@ -178,7 +175,7 @@ impl BlockCursor<'_> {
         }
 
         self.remaining -= 1;
-        self.current_type
+        usize::from(self.encoding.split.types[self.block_index])
     }
 }
 
