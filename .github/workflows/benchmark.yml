@@ -55,10 +55,13 @@ jobs:
               source
           }
           RS
-      - name: Build accepted encoder with line info
+      - name: Build accepted encoder with DWARF v4 line info
         env:
-          RUSTFLAGS: -C debuginfo=2 -C force-frame-pointers=yes
-        run: cargo build --release --example q5_profile
+          RUSTFLAGS: -C debuginfo=2 -C dwarf-version=4 -C force-frame-pointers=yes
+        run: |
+          cargo build --release --example q5_profile
+          echo '=== decoded matcher line table ==='
+          objdump --dwarf=decodedline target/release/examples/q5_profile | grep 'match_finder.rs' | head -n 40 || true
       - name: Profile structured q5
         run: |
           valgrind --tool=callgrind \
@@ -66,24 +69,18 @@ jobs:
             --branch-sim=yes \
             --callgrind-out-file=callgrind.out \
             ./target/release/examples/q5_profile
+          echo '=== raw matcher mappings ==='
+          grep -E '^(fl|fn|cfl|cfn)=' callgrind.out | grep -E 'match_finder|QualityFiveHasher|bit_writer|BitWriter' | head -n 160 || true
           echo '=== exclusive function summary ==='
           callgrind_annotate \
             --inclusive=no \
             --show=Ir,D1mr,Bc,Bcm \
-            --threshold=0.05 \
-            callgrind.out | head -n 500
-          echo '=== selected encode source lines ==='
+            --threshold=0.02 \
+            callgrind.out | head -n 800
+          echo '=== auto source annotation ==='
           callgrind_annotate \
             --inclusive=no \
             --auto=yes \
             --show=Ir,D1mr,Bc,Bcm \
-            --threshold=0.01 \
-            callgrind.out \
-            src/encode/match_finder.rs \
-            src/encode/bit_writer.rs \
-            src/encode/static_dictionary.in \
-            src/encode/prefix_code.rs \
-            src/encode/greedy.rs \
-            src/encode/greedy/block_split.rs \
-            src/encode/command.rs \
-            src/encode/distance.rs | head -n 1600
+            --threshold=0.005 \
+            callgrind.out | grep -A220 -B20 'match_finder.rs' | head -n 1400 || true
