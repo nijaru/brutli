@@ -177,9 +177,6 @@ impl QualityFiveHasher {
                         score,
                     };
                 }
-                if length == max_length {
-                    break;
-                }
             }
         }
 
