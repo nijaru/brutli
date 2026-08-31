@@ -66,21 +66,24 @@ jobs:
             --branch-sim=yes \
             --callgrind-out-file=callgrind.out \
             ./target/release/examples/q5_profile
-          echo '=== function summary ==='
+          echo '=== exclusive function summary ==='
           callgrind_annotate \
-            --inclusive=yes \
-            --show=Ir,D1mr,Bc,Bcm \
-            --threshold=0.2 \
-            callgrind.out | head -n 260
-          echo '=== encode source lines ==='
-          callgrind_annotate \
-            --inclusive=yes \
-            --auto=yes \
+            --inclusive=no \
             --show=Ir,D1mr,Bc,Bcm \
             --threshold=0.05 \
+            callgrind.out | head -n 500
+          echo '=== selected encode source lines ==='
+          callgrind_annotate \
+            --inclusive=no \
+            --auto=yes \
+            --show=Ir,D1mr,Bc,Bcm \
+            --threshold=0.01 \
             callgrind.out \
             src/encode/match_finder.rs \
             src/encode/bit_writer.rs \
-            src/encode/static_dictionary.rs \
+            src/encode/static_dictionary.in \
             src/encode/prefix_code.rs \
-            src/encode/block_splitter.rs | head -n 900
+            src/encode/greedy.rs \
+            src/encode/greedy/block_split.rs \
+            src/encode/command.rs \
+            src/encode/distance.rs | head -n 1600
