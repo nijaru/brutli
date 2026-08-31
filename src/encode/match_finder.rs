@@ -110,68 +110,28 @@ impl QualityFiveHasher {
         let mut best_length = 0_usize;
         let mut best_score = MIN_SCORE;
 
-        'search: {
-            for (index, &backward) in recent_distances
-                .iter()
-                .take(NUM_LAST_DISTANCES_TO_CHECK)
-                .enumerate()
+        for (index, &backward) in recent_distances
+            .iter()
+            .take(NUM_LAST_DISTANCES_TO_CHECK)
+            .enumerate()
+        {
+            if backward == 0 || backward > position || backward > max_backward {
+                continue;
+            }
+            let previous = position - backward;
+            if best_length < max_length
+                && input[position + best_length] != input[previous + best_length]
             {
-                if backward == 0 || backward > position || backward > max_backward {
-                    continue;
-                }
-                let previous = position - backward;
-                if best_length < max_length
-                    && input[position + best_length] != input[previous + best_length]
-                {
-                    continue;
-                }
-
-                let length = match_length(input, previous, position, max_length);
-                if length >= 3 || (length == 2 && index < 2) {
-                    let mut score = score_using_last_distance(length);
-                    if best_score < score {
-                        if index != 0 {
-                            score = score.saturating_sub(last_distance_penalty(index));
-                        }
-                        if best_score < score {
-                            best_score = score;
-                            best_length = length;
-                            result = SearchResult {
-                                length,
-                                length_code: length,
-                                distance: backward,
-                                score,
-                            };
-                            if index == 0 && length == max_length {
-                                break 'search;
-                            }
-                        }
-                    }
-                }
+                continue;
             }
 
-            let oldest = count.saturating_sub(BLOCK_SIZE);
-            for index in (oldest..count).rev() {
-                let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
-                debug_assert!(previous < position);
-                let backward = position - previous;
-                if backward > max_backward {
-                    break;
-                }
-
-                let comparison_length = best_length.max(3);
-                if comparison_length < max_length {
-                    let compare_at = comparison_length - 3;
-                    if read_u32(input, position + compare_at)
-                        != read_u32(input, previous + compare_at)
-                    {
-                        continue;
+            let length = match_length(input, previous, position, max_length);
+            if length >= 3 || (length == 2 && index < 2) {
+                let mut score = score_using_last_distance(length);
+                if best_score < score {
+                    if index != 0 {
+                        score = score.saturating_sub(last_distance_penalty(index));
                     }
-                }
-
-                let length = match_length(input, previous, position, max_length);
-                if length >= 4 {
-                    let score = backward_reference_score(length, backward);
                     if best_score < score {
                         best_score = score;
                         best_length = length;
@@ -182,6 +142,40 @@ impl QualityFiveHasher {
                             score,
                         };
                     }
+                }
+            }
+        }
+
+        let oldest = count.saturating_sub(BLOCK_SIZE);
+        for index in (oldest..count).rev() {
+            let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
+            debug_assert!(previous < position);
+            let backward = position - previous;
+            if backward > max_backward {
+                break;
+            }
+
+            let comparison_length = best_length.max(3);
+            if comparison_length < max_length {
+                let compare_at = comparison_length - 3;
+                if read_u32(input, position + compare_at) != read_u32(input, previous + compare_at)
+                {
+                    continue;
+                }
+            }
+
+            let length = match_length(input, previous, position, max_length);
+            if length >= 4 {
+                let score = backward_reference_score(length, backward);
+                if best_score < score {
+                    best_score = score;
+                    best_length = length;
+                    result = SearchResult {
+                        length,
+                        length_code: length,
+                        distance: backward,
+                        score,
+                    };
                 }
             }
         }
