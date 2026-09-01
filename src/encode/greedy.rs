@@ -83,7 +83,7 @@ pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
     }
 
     let literal_context = choose_q5_literal_context(input);
-    let distance_alphabet = alphabet_size(GREEDY_DIRECT_DISTANCE_CODES);
+    let distance_alphabet = alphabet_size(GREEDY_DIRECT_DISTANCE_CODES, 0);
     let tail_length = input.len() - parse.tail_start;
     let literal_count = parse
         .commands
@@ -127,7 +127,7 @@ pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
         );
         let distance = command
             .requires_distance()
-            .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES));
+            .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES, 0));
         command_frequencies[usize::from(command.symbol)] += 1;
         command_splitter.add_symbol(usize::from(command.symbol));
         if let Some(distance) = distance {

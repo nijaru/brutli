@@ -68,7 +68,7 @@ impl RecentDistances {
         if raw_code != 0 {
             self.push(distance);
         }
-        DistanceCode::for_code(raw_code, direct_codes)
+        DistanceCode::for_code(raw_code, direct_codes, 0)
     }
 
     #[cfg(test)]
@@ -115,39 +115,53 @@ impl DistanceCode {
         }
     }
 
-    pub(super) fn for_code(code: usize, direct_codes: u16) -> Self {
+    pub(super) fn for_code(code: usize, direct_codes: u16, postfix_bits: u8) -> Self {
         if code < usize::from(SHORT_CODE_COUNT) {
             return Self::for_short_symbol(code as u16);
         }
-        let distance = code - (usize::from(SHORT_CODE_COUNT) - 1);
-        Self::for_distance(distance, direct_codes)
+        Self::for_intermediate_code(code, direct_codes, postfix_bits)
     }
 
-    pub(super) fn for_distance(distance: usize, direct_codes: u16) -> Self {
+    pub(super) fn for_distance(distance: usize, direct_codes: u16, postfix_bits: u8) -> Self {
         assert!(distance != 0);
+        let distance_code = distance
+            .checked_add(usize::from(SHORT_CODE_COUNT) - 1)
+            .expect("distance code fits usize");
+        Self::for_intermediate_code(distance_code, direct_codes, postfix_bits)
+    }
 
-        if distance <= usize::from(direct_codes) {
+    fn for_intermediate_code(code: usize, direct_codes: u16, postfix_bits: u8) -> Self {
+        debug_assert!(postfix_bits <= 3);
+        if code < usize::from(SHORT_CODE_COUNT) + usize::from(direct_codes) {
             return Self {
-                symbol: SHORT_CODE_COUNT + distance as u16 - 1,
+                symbol: code as u16,
                 extra: 0,
                 extra_bits: 0,
             };
         }
 
-        let dist = distance + 3 - usize::from(direct_codes);
+        let dist = (1_usize << (usize::from(postfix_bits) + 2)) + code
+            - usize::from(SHORT_CODE_COUNT)
+            - usize::from(direct_codes);
         let bucket = log2_floor_nonzero(dist) - 1;
+        let postfix_mask = (1_usize << postfix_bits) - 1;
+        let postfix = dist & postfix_mask;
         let prefix = (dist >> bucket) & 1;
         let offset = (2 + prefix) << bucket;
-        let code = 2 * (bucket - 1) + prefix;
+        let extra_bits = bucket - usize::from(postfix_bits);
+        let distance_symbol = usize::from(SHORT_CODE_COUNT)
+            + usize::from(direct_codes)
+            + ((2 * (extra_bits - 1) + prefix) << postfix_bits)
+            + postfix;
         assert!(
-            code < usize::from(POSTFIX_CODE_COUNT),
+            distance_symbol < usize::from(alphabet_size(direct_codes, postfix_bits)),
             "distance exceeds the RFC 7932 window range"
         );
 
         Self {
-            symbol: SHORT_CODE_COUNT + direct_codes + code as u16,
-            extra: (dist - offset) as u32,
-            extra_bits: bucket as u8,
+            symbol: distance_symbol as u16,
+            extra: ((dist - offset) >> postfix_bits) as u32,
+            extra_bits: extra_bits as u8,
         }
     }
 
@@ -165,8 +179,8 @@ fn log2_floor_nonzero(value: usize) -> usize {
     usize::BITS as usize - 1 - value.leading_zeros() as usize
 }
 
-pub(super) const fn alphabet_size(direct_codes: u16) -> u16 {
-    SHORT_CODE_COUNT + direct_codes + POSTFIX_CODE_COUNT
+pub(super) const fn alphabet_size(direct_codes: u16, postfix_bits: u8) -> u16 {
+    SHORT_CODE_COUNT + direct_codes + (POSTFIX_CODE_COUNT << postfix_bits)
 }
 
 #[cfg(test)]
@@ -179,7 +193,7 @@ mod tests {
     #[test]
     fn direct_distances_use_no_extra_bits() {
         for distance in 1..=4 {
-            let code = DistanceCode::for_distance(distance, 4);
+            let code = DistanceCode::for_distance(distance, 4, 0);
             assert_eq!(code.symbol, 15 + distance as u16);
             assert_eq!(code.extra_bit_count(), 0);
 
@@ -192,9 +206,9 @@ mod tests {
     #[test]
     fn raw_distance_codes_preserve_short_codes() {
         for code in 0..16 {
-            assert_eq!(DistanceCode::for_code(code, 4).symbol, code as u16);
+            assert_eq!(DistanceCode::for_code(code, 4, 0).symbol, code as u16);
         }
-        assert_eq!(DistanceCode::for_code(16, 4).symbol, 16);
+        assert_eq!(DistanceCode::for_code(16, 4, 0).symbol, 16);
     }
 
     #[test]
@@ -245,8 +259,8 @@ mod tests {
     #[test]
     fn non_direct_ranges_are_contiguous() {
         for distance in 5..=4096 {
-            let code = DistanceCode::for_distance(distance, 4);
-            assert!((20..alphabet_size(4)).contains(&code.symbol));
+            let code = DistanceCode::for_distance(distance, 4, 0);
+            assert!((20..alphabet_size(4, 0)).contains(&code.symbol));
         }
     }
 
@@ -254,8 +268,8 @@ mod tests {
     fn direct_formula_matches_reference_range_scan() {
         for direct_codes in [0_u16, 4, 12, 120] {
             for distance in 1..=1_000_000 {
-                let direct = DistanceCode::for_distance(distance, direct_codes);
-                let scanned = reference_distance_code(distance, direct_codes);
+                let direct = DistanceCode::for_distance(distance, direct_codes, 0);
+                let scanned = reference_distance_code(distance, direct_codes, 0);
                 assert_eq!(
                     direct, scanned,
                     "distance={distance}, direct_codes={direct_codes}"
@@ -265,19 +279,70 @@ mod tests {
     }
 
     #[test]
+    fn postfix_distances_support_direct_codes_and_round_trip() {
+        let direct_codes = 12;
+        let postfix_bits = 1;
+        assert_eq!(alphabet_size(direct_codes, postfix_bits), 124);
+
+        for distance in 1..=4096 {
+            let encoded = DistanceCode::for_distance(distance, direct_codes, postfix_bits);
+            assert_eq!(
+                encoded,
+                reference_distance_code(distance, direct_codes, postfix_bits),
+                "distance={distance}"
+            );
+            assert_eq!(
+                decode_distance(encoded, direct_codes, postfix_bits),
+                distance
+            );
+
+            if distance <= usize::from(direct_codes) {
+                assert_eq!(encoded.symbol, 15 + distance as u16);
+                assert_eq!(encoded.extra_bit_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn postfix_distance_code_uses_intermediate_distance_codes() {
+        for distance in 13..=4096 {
+            let from_distance = DistanceCode::for_distance(distance, 12, 1);
+            let from_code = DistanceCode::for_code(distance + 15, 12, 1);
+            assert_eq!(from_distance, from_code, "distance={distance}");
+        }
+    }
+
+    #[test]
     fn reports_distance_extra_bits() {
-        assert_eq!(DistanceCode::for_distance(17, 4).extra_bit_count(), 3);
+        assert_eq!(DistanceCode::for_distance(17, 4, 0).extra_bit_count(), 3);
     }
 
     #[test]
     fn writes_distance_extra_bits() {
-        let code = DistanceCode::for_distance(17, 4);
+        let code = DistanceCode::for_distance(17, 4, 0);
         let mut writer = BitWriter::default();
         code.write_extra(&mut writer);
         assert!(!writer.finish().is_empty());
     }
 
-    fn reference_distance_code(distance: usize, direct_codes: u16) -> DistanceCode {
+    fn decode_distance(code: DistanceCode, direct_codes: u16, postfix_bits: u8) -> usize {
+        if code.symbol < SHORT_CODE_COUNT + direct_codes {
+            return usize::from(code.symbol - SHORT_CODE_COUNT + 1);
+        }
+
+        let symbol_code = usize::from(code.symbol - SHORT_CODE_COUNT - direct_codes);
+        let hcode = symbol_code >> postfix_bits;
+        let lcode = symbol_code & ((1 << postfix_bits) - 1);
+        let bits = 1 + (hcode >> 1);
+        let offset = ((2 + (hcode & 1)) << bits) - 4;
+        ((offset + code.extra as usize) << postfix_bits) + lcode + usize::from(direct_codes) + 1
+    }
+
+    fn reference_distance_code(
+        distance: usize,
+        direct_codes: u16,
+        postfix_bits: u8,
+    ) -> DistanceCode {
         if distance <= usize::from(direct_codes) {
             return DistanceCode {
                 symbol: SHORT_CODE_COUNT + distance as u16 - 1,
@@ -286,14 +351,21 @@ mod tests {
             };
         }
 
-        for code in 0..POSTFIX_CODE_COUNT {
-            let bits = 1 + (code >> 1);
-            let base = (((2 + usize::from(code & 1)) << bits) - 4) + usize::from(direct_codes) + 1;
-            let range = 1_usize << bits;
-            if distance >= base && distance - base < range {
+        for code in 0..(POSTFIX_CODE_COUNT << postfix_bits) {
+            let hcode = code >> postfix_bits;
+            let lcode = code & ((1 << postfix_bits) - 1);
+            let bits = 1 + (hcode >> 1);
+            let offset = ((2 + usize::from(hcode & 1)) << bits) - 4;
+            let base =
+                (offset << postfix_bits) + usize::from(lcode) + usize::from(direct_codes) + 1;
+            let range = 1_usize << (bits + u16::from(postfix_bits));
+            if distance >= base
+                && distance - base < range
+                && (distance - base) & ((1 << postfix_bits) - 1) == 0
+            {
                 return DistanceCode {
                     symbol: SHORT_CODE_COUNT + direct_codes + code,
-                    extra: (distance - base) as u32,
+                    extra: ((distance - base) >> postfix_bits) as u32,
                     extra_bits: bits as u8,
                 };
             }
