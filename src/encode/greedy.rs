@@ -17,7 +17,6 @@ use super::{
     write_final_compressed_header, write_simple_compressed_header, write_window_bits,
 };
 
-const GREEDY_DIRECT_DISTANCE_CODES: u16 = 0;
 const UTF8_LITERAL_CONTEXT_MODE: u64 = 2;
 const CONTEXT_SAMPLE_STRIDE: usize = 4096;
 const CONTEXT_SAMPLE_LENGTH: usize = 64;
@@ -83,7 +82,9 @@ pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
     }
 
     let literal_context = choose_q5_literal_context(input);
-    let distance_alphabet = alphabet_size(GREEDY_DIRECT_DISTANCE_CODES, 0);
+    let direct_distance_codes = config.direct_distance_codes();
+    let distance_postfix_bits = config.distance_postfix_bits();
+    let distance_alphabet = alphabet_size(direct_distance_codes, distance_postfix_bits);
     let tail_length = input.len() - parse.tail_start;
     let literal_count = parse
         .commands
@@ -125,9 +126,13 @@ pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
             parsed.copy_length_code,
             parsed.distance_code == 0,
         );
-        let distance = command
-            .requires_distance()
-            .then(|| DistanceCode::for_code(parsed.distance_code, GREEDY_DIRECT_DISTANCE_CODES, 0));
+        let distance = command.requires_distance().then(|| {
+            DistanceCode::for_code(
+                parsed.distance_code,
+                direct_distance_codes,
+                distance_postfix_bits,
+            )
+        });
         command_frequencies[usize::from(command.symbol)] += 1;
         command_splitter.add_symbol(usize::from(command.symbol));
         if let Some(distance) = distance {
@@ -224,7 +229,11 @@ fn estimate_single_tree_size(
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, plan.config.window_bits());
     write_final_compressed_header(&mut writer, plan.input.len());
-    write_simple_compressed_header(&mut writer, GREEDY_DIRECT_DISTANCE_CODES);
+    write_simple_compressed_header(
+        &mut writer,
+        plan.config.direct_distance_codes(),
+        plan.config.distance_postfix_bits(),
+    );
     literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
     plan.command_code
         .write_tree(&mut writer, COMMAND_ALPHABET_SIZE);
@@ -251,7 +260,11 @@ fn encode_single_tree(plan: &EncodingPlan<'_>, literal_code: &PrefixEncoding) ->
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, plan.config.window_bits());
     write_final_compressed_header(&mut writer, plan.input.len());
-    write_simple_compressed_header(&mut writer, GREEDY_DIRECT_DISTANCE_CODES);
+    write_simple_compressed_header(
+        &mut writer,
+        plan.config.direct_distance_codes(),
+        plan.config.distance_postfix_bits(),
+    );
     literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
     plan.command_code
         .write_tree(&mut writer, COMMAND_ALPHABET_SIZE);
@@ -304,8 +317,12 @@ fn encode_greedy_splits(plan: &EncodingPlan<'_>, splits: GreedySplits) -> Option
     literal_split.write_header(&mut writer);
     command_split.write_header(&mut writer);
     distance_split.write_header(&mut writer);
-    writer.write_bits(0, 2); // NPOSTFIX
-    writer.write_bits(0, 4); // NDIRECT
+    writer.write_bits(u64::from(plan.config.distance_postfix_bits()), 2); // NPOSTFIX
+    // The wire field stores NDIRECT >> NPOSTFIX.
+    writer.write_bits(
+        u64::from(plan.config.direct_distance_codes() >> plan.config.distance_postfix_bits()),
+        4,
+    ); // NDIRECT
     for _ in 0..literal_split.num_types() {
         writer.write_bits(UTF8_LITERAL_CONTEXT_MODE, 2);
     }
@@ -562,7 +579,7 @@ mod tests {
     use crate::decompress;
 
     fn default_config() -> EncoderConfig {
-        EncoderConfig::new(DEFAULT_WINDOW_BITS, 5).unwrap()
+        EncoderConfig::new(DEFAULT_WINDOW_BITS, 5, crate::EncoderMode::Generic).unwrap()
     }
 
     #[test]

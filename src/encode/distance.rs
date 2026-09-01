@@ -122,6 +122,7 @@ impl DistanceCode {
         Self::for_intermediate_code(code, direct_codes, postfix_bits)
     }
 
+    #[cfg(test)]
     pub(super) fn for_distance(distance: usize, direct_codes: u16, postfix_bits: u8) -> Self {
         assert!(distance != 0);
         let distance_code = distance

@@ -99,7 +99,7 @@ Its current baseline includes:
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. Modes and streaming operations remain future RFC 7932 work.
+Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Streaming operations remain future RFC 7932 work.
 
 ## Goals
 

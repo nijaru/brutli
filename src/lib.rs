@@ -222,6 +222,17 @@ impl Decoder {
     }
 }
 
+/// Input modes supported by Brotli encoders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderMode {
+    /// General-purpose binary or mixed input.
+    Generic,
+    /// Natural-language or UTF-8-heavy input.
+    Text,
+    /// Font data, which uses Brotli's font distance parameters.
+    Font,
+}
+
 /// Options controlling one-shot Brotli encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderOptions {
@@ -229,6 +240,8 @@ pub struct EncoderOptions {
     pub quality: u8,
     /// RFC 7932 window bits from `10` through `24`.
     pub window_bits: u8,
+    /// Heuristic mode used by the encoder.
+    pub mode: EncoderMode,
 }
 
 impl Default for EncoderOptions {
@@ -236,6 +249,7 @@ impl Default for EncoderOptions {
         Self {
             quality: 5,
             window_bits: 22,
+            mode: EncoderMode::Generic,
         }
     }
 }
@@ -287,7 +301,7 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 ///
 /// Quality values `0..=11` and RFC 7932 window values `10..=24` are accepted.
 /// The current implementation remains a partial upstream-compatible encoder;
-/// mode and streaming controls are not part of [`EncoderOptions`] yet.
+/// streaming controls are not part of [`EncoderOptions`] yet.
 pub fn compress_with_options(
     input: &[u8],
     options: EncoderOptions,
@@ -298,7 +312,7 @@ pub fn compress_with_options(
 /// Encodes one complete RFC 7932 Brotli stream with a selected window size.
 ///
 /// `window_bits` must be in the RFC 7932 range `10..=24`. The window size is
-/// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder; mode and
+/// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder;
 /// streaming controls are not exposed yet.
 pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8>, EncodeError> {
     compress_with_options(
@@ -315,8 +329,7 @@ pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8
 ///
 /// Quality values from `0` through `11` are accepted. Higher values spend more
 /// work searching for matches. This one-shot encoder is still a partial
-/// upstream-compatible implementation; mode and streaming controls are not
-/// exposed yet.
+/// upstream-compatible implementation; streaming controls are not exposed yet.
 pub fn compress_with_quality(input: &[u8], quality: u8) -> Result<Vec<u8>, EncodeError> {
     compress_with_options(
         input,

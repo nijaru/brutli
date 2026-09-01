@@ -419,7 +419,8 @@ mod tests {
     use crate::encode::{DEFAULT_WINDOW_BITS, EncoderConfig};
 
     fn default_limits() -> (usize, usize, usize, usize) {
-        let config = EncoderConfig::new(DEFAULT_WINDOW_BITS, 5).unwrap();
+        let config =
+            EncoderConfig::new(DEFAULT_WINDOW_BITS, 5, crate::EncoderMode::Generic).unwrap();
         (
             config.max_backward_distance(),
             config.max_distance(),

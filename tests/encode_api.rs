@@ -31,16 +31,23 @@ fn compression_accepts_all_rfc_window_sizes() {
 #[test]
 fn compression_accepts_explicit_options() {
     let source = b"abcd".repeat(1024);
-    let encoded = compress_with_options(
-        &source,
-        EncoderOptions {
-            quality: 1,
-            window_bits: 10,
-        },
-    )
-    .unwrap();
+    for mode in [
+        brutli::EncoderMode::Generic,
+        brutli::EncoderMode::Text,
+        brutli::EncoderMode::Font,
+    ] {
+        let encoded = compress_with_options(
+            &source,
+            EncoderOptions {
+                quality: 1,
+                window_bits: 10,
+                mode,
+            },
+        )
+        .unwrap();
 
-    assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
 }
 
 #[test]
@@ -49,6 +56,31 @@ fn compression_accepts_all_quality_levels() {
 
     for quality in 0..=11 {
         let encoded = brutli::compress_with_quality(&source, quality).unwrap();
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+}
+
+#[test]
+fn font_mode_round_trips_with_match_distances() {
+    // Font input that takes the greedy path: repeated glyphs far enough apart
+    // to be encoded as backward references rather than a periodic block.
+    let mut source = Vec::new();
+    for _ in 0..256 {
+        source.extend_from_slice(b"\x00glyph run with binary\xff payload\x01 ");
+    }
+    assert!(source.len() > 4096);
+
+    for quality in [4, 5, 11] {
+        let encoded = compress_with_options(
+            &source,
+            EncoderOptions {
+                quality,
+                window_bits: 22,
+                mode: brutli::EncoderMode::Font,
+            },
+        )
+        .unwrap();
+        assert!(encoded.len() < source.len());
         assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
     }
 }

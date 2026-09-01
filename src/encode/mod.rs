@@ -12,7 +12,7 @@ use prefix_code::{
     PrefixEncoding, write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
 };
 
-use crate::{EncodeError, EncoderOptions};
+use crate::{EncodeError, EncoderMode, EncoderOptions};
 pub(super) const DEFAULT_WINDOW_BITS: u8 = 22;
 const MIN_WINDOW_BITS: u8 = 10;
 const MAX_WINDOW_BITS: u8 = 24;
@@ -23,10 +23,11 @@ const MAX_DISTANCE: usize = 0x3ff_fffc;
 pub(super) struct EncoderConfig {
     window_bits: u8,
     quality: u8,
+    mode: EncoderMode,
 }
 
 impl EncoderConfig {
-    fn new(window_bits: u8, quality: u8) -> Result<Self, EncodeError> {
+    fn new(window_bits: u8, quality: u8, mode: EncoderMode) -> Result<Self, EncodeError> {
         if quality > 11 {
             return Err(EncodeError::InvalidQuality { quality });
         }
@@ -36,6 +37,7 @@ impl EncoderConfig {
         Ok(Self {
             window_bits,
             quality,
+            mode,
         })
     }
 
@@ -67,6 +69,25 @@ impl EncoderConfig {
     pub(super) const fn max_lazy_delays(self) -> usize {
         if self.quality >= 5 { 4 } else { 0 }
     }
+
+    /// Distance code parameters chosen for the configured mode, matching the
+    /// upstream `ChooseDistanceParams` behavior: font input at quality >= 4
+    /// uses one postfix bit and twelve direct codes; everything else uses none.
+    pub(super) const fn distance_postfix_bits(self) -> u8 {
+        if matches!(self.mode, EncoderMode::Font) && self.quality >= 4 {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub(super) const fn direct_distance_codes(self) -> u16 {
+        if matches!(self.mode, EncoderMode::Font) && self.quality >= 4 {
+            12
+        } else {
+            0
+        }
+    }
 }
 const LITERAL_ALPHABET_SIZE: u16 = 256;
 const COMMAND_ALPHABET_SIZE: u16 = 704;
@@ -80,6 +101,7 @@ pub(super) fn compress(input: &[u8]) -> Vec<u8> {
         EncoderOptions {
             quality: 5,
             window_bits: DEFAULT_WINDOW_BITS,
+            ..EncoderOptions::default()
         },
     )
     .expect("the default RFC 7932 encoder options are valid")
@@ -89,7 +111,7 @@ pub(super) fn compress_with_options(
     input: &[u8],
     options: EncoderOptions,
 ) -> Result<Vec<u8>, EncodeError> {
-    let config = EncoderConfig::new(options.window_bits, options.quality)?;
+    let config = EncoderConfig::new(options.window_bits, options.quality, options.mode)?;
     Ok(compress_with_config(input, config))
 }
 
@@ -170,7 +192,7 @@ fn try_simple_compressed(input: &[u8], config: EncoderConfig) -> Option<Vec<u8>>
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, config.window_bits());
     write_final_compressed_header(&mut writer, input.len());
-    write_simple_compressed_header(&mut writer, 0);
+    write_simple_compressed_header(&mut writer, 0, 0);
 
     write_simple_prefix_code(&mut writer, &symbols, LITERAL_ALPHABET_SIZE);
     write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
@@ -209,7 +231,7 @@ fn try_general_literal_compressed(input: &[u8], config: EncoderConfig) -> Option
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, config.window_bits());
     write_final_compressed_header(&mut writer, input.len());
-    write_simple_compressed_header(&mut writer, 0);
+    write_simple_compressed_header(&mut writer, 0, 0);
 
     literal_code.write_tree(&mut writer, LITERAL_ALPHABET_SIZE);
     write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
@@ -237,7 +259,7 @@ fn try_periodic_compressed(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
     let mut writer = BitWriter::default();
     write_window_bits(&mut writer, config.window_bits());
     write_final_compressed_header(&mut writer, input.len());
-    write_simple_compressed_header(&mut writer, DIRECT_DISTANCE_CODES);
+    write_simple_compressed_header(&mut writer, DIRECT_DISTANCE_CODES, 0);
 
     write_simple_prefix_code(&mut writer, &symbols, LITERAL_ALPHABET_SIZE);
     write_simple_prefix_code(&mut writer, &[command.symbol], COMMAND_ALPHABET_SIZE);
@@ -328,14 +350,21 @@ fn write_final_compressed_header(writer: &mut BitWriter, length: usize) {
     writer.write_bits((length - 1) as u64, nibbles * 4); // MLEN - 1
 }
 
-fn write_simple_compressed_header(writer: &mut BitWriter, direct_distance_codes: u16) {
-    debug_assert!(direct_distance_codes <= 15);
+fn write_simple_compressed_header(
+    writer: &mut BitWriter,
+    direct_distance_codes: u16,
+    postfix_bits: u8,
+) {
+    debug_assert!(postfix_bits <= 3);
+    debug_assert_eq!(direct_distance_codes & ((1 << postfix_bits) - 1), 0);
+    debug_assert!(direct_distance_codes >> postfix_bits <= 15);
 
     write_var_len_u8(writer, 0); // one literal block type
     write_var_len_u8(writer, 0); // one insert-and-copy block type
     write_var_len_u8(writer, 0); // one distance block type
-    writer.write_bits(0, 2); // NPOSTFIX
-    writer.write_bits(u64::from(direct_distance_codes), 4); // NDIRECT
+    writer.write_bits(u64::from(postfix_bits), 2); // NPOSTFIX
+    // The wire field stores NDIRECT >> NPOSTFIX.
+    writer.write_bits(u64::from(direct_distance_codes >> postfix_bits), 4); // NDIRECT
     writer.write_bits(0, 2); // literal context mode
     write_var_len_u8(writer, 0); // one literal tree
     write_var_len_u8(writer, 0); // one distance tree
@@ -379,7 +408,7 @@ mod tests {
     use crate::{DecodeError, Decoder, compress_with_window_bits, decompress};
 
     fn default_config() -> EncoderConfig {
-        EncoderConfig::new(DEFAULT_WINDOW_BITS, 5).unwrap()
+        EncoderConfig::new(DEFAULT_WINDOW_BITS, 5, crate::EncoderMode::Generic).unwrap()
     }
 
     #[test]
