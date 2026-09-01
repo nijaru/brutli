@@ -35,6 +35,183 @@ pub(super) struct Parse {
     pub(super) tail_start: usize,
 }
 
+/// Streaming match finder: parses one chunk per call while keeping the hash
+/// index and the recent-distance ring across chunk (metablock) boundaries.
+/// Each call receives the stream from its start through the chunk's end, so
+/// matches may reference already-emitted output from earlier chunks.
+#[derive(Debug)]
+pub(super) struct MatchFinder {
+    hasher: QualityFiveHasher,
+    recent_distances: RecentDistances,
+    limits: SearchLimits,
+    max_lazy_delays: usize,
+    position: usize,
+    apply_random_heuristics: usize,
+}
+
+impl MatchFinder {
+    pub(super) fn new(
+        max_backward_distance: usize,
+        max_distance: usize,
+        search_depth: usize,
+        max_lazy_delays: usize,
+    ) -> Self {
+        Self {
+            hasher: QualityFiveHasher::new(),
+            recent_distances: RecentDistances::default(),
+            limits: SearchLimits {
+                max_backward: max_backward_distance,
+                max_distance,
+                search_depth,
+            },
+            max_lazy_delays,
+            position: 0,
+            apply_random_heuristics: RANDOM_HEURISTICS_WINDOW,
+        }
+    }
+
+    pub(super) fn snapshot_distances(&self) -> [usize; 4] {
+        self.recent_distances.values()
+    }
+
+    pub(super) fn restore_distances(&mut self, snapshot: [usize; 4]) {
+        self.recent_distances.restore(snapshot);
+    }
+
+    /// Parses the chunk ending at `input.len()`, starting from the stream
+    /// position carried over from the previous chunk. The pending literal run
+    /// ending at the chunk boundary is reported via `tail_start`; the caller
+    /// must emit it with this chunk and continue the next chunk from
+    /// `input.len()`.
+    pub(super) fn parse_chunk(&mut self, input: &[u8], input_start: usize) -> Parse {
+        assert!(
+            u32::try_from(input.len()).is_ok(),
+            "match input exceeds u32 position range"
+        );
+        debug_assert_eq!(self.position, input_start);
+        debug_assert!(input_start <= input.len());
+
+        self.position = input.len();
+        if input.len() <= HASH_TYPE_LENGTH {
+            return Parse {
+                commands: Vec::new(),
+                tail_start: input_start,
+            };
+        }
+
+        let end = input.len();
+        let store_end = end - STORE_LOOKAHEAD + 1;
+        let mut commands = Vec::new();
+        let mut position = input_start;
+        let mut insert_start = input_start;
+        let mut insert_length = 0_usize;
+        let mut apply_random_heuristics = self.apply_random_heuristics;
+
+        while position + HASH_TYPE_LENGTH < end {
+            let mut result = self.hasher.find_longest_match(
+                input,
+                self.recent_distances.values(),
+                position,
+                end - position,
+                SearchLimits {
+                    max_backward: position.min(self.limits.max_backward),
+                    ..self.limits
+                },
+            );
+
+            if result.score > MIN_SCORE {
+                let mut delayed = 0_usize;
+                while delayed < self.max_lazy_delays {
+                    let next_position = position + 1;
+                    let next = self.hasher.find_longest_match(
+                        input,
+                        self.recent_distances.values(),
+                        next_position,
+                        end - next_position,
+                        SearchLimits {
+                            max_backward: next_position.min(self.limits.max_backward),
+                            ..self.limits
+                        },
+                    );
+                    if next.score >= result.score + LAZY_SCORE_DELTA {
+                        position = next_position;
+                        insert_length += 1;
+                        result = next;
+                        delayed += 1;
+                        if position + HASH_TYPE_LENGTH >= end {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                apply_random_heuristics = position
+                    .saturating_add(2 * result.length)
+                    .saturating_add(RANDOM_HEURISTICS_WINDOW);
+                let max_backward = position.min(self.limits.max_backward);
+                let distance_code = self
+                    .recent_distances
+                    .compute_code(result.distance, max_backward);
+                if result.distance <= max_backward && distance_code != 0 {
+                    self.recent_distances.push(result.distance);
+                }
+
+                commands.push(MatchCommand {
+                    insert_start,
+                    insert_length,
+                    copy_length: result.length,
+                    copy_length_code: result.length_code,
+                    distance: result.distance,
+                    distance_code,
+                });
+
+                let mut range_start = position + 2;
+                let range_end = (position + result.length).min(store_end);
+                if result.distance < (result.length >> 2) {
+                    range_start = range_start
+                        .max(position + result.length - (result.distance << 2))
+                        .min(range_end);
+                }
+                self.hasher.store_range(input, range_start, range_end);
+
+                position += result.length;
+                insert_start = position;
+                insert_length = 0;
+            } else {
+                insert_length += 1;
+                position += 1;
+
+                if position > apply_random_heuristics {
+                    if position > apply_random_heuristics + 4 * RANDOM_HEURISTICS_WINDOW {
+                        let margin = (STORE_LOOKAHEAD - 1).max(4);
+                        let jump_end = (position + 16).min(end.saturating_sub(margin));
+                        while position < jump_end {
+                            self.hasher.store(input, position);
+                            position += 4;
+                            insert_length += 4;
+                        }
+                    } else {
+                        let margin = (STORE_LOOKAHEAD - 1).max(2);
+                        let jump_end = (position + 8).min(end.saturating_sub(margin));
+                        while position < jump_end {
+                            self.hasher.store(input, position);
+                            position += 2;
+                            insert_length += 2;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.apply_random_heuristics = apply_random_heuristics;
+        Parse {
+            commands,
+            tail_start: insert_start,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SearchResult {
     length: usize,
@@ -222,130 +399,13 @@ pub(super) fn create_backward_references(
         "match input exceeds u32 position range"
     );
 
-    if input.len() <= HASH_TYPE_LENGTH {
-        return Parse {
-            commands: Vec::new(),
-            tail_start: 0,
-        };
-    }
-
-    let end = input.len();
-    let store_end = if end >= STORE_LOOKAHEAD {
-        end - STORE_LOOKAHEAD + 1
-    } else {
-        0
-    };
-    let mut hasher = QualityFiveHasher::new();
-    let mut recent_distances = RecentDistances::default();
-    let mut commands = Vec::new();
-    let mut position = 0_usize;
-    let mut insert_start = 0_usize;
-    let mut insert_length = 0_usize;
-    let mut apply_random_heuristics = RANDOM_HEURISTICS_WINDOW;
-
-    while position + HASH_TYPE_LENGTH < end {
-        let max_backward = position.min(max_backward_distance);
-        let mut result = hasher.find_longest_match(
-            input,
-            recent_distances.values(),
-            position,
-            end - position,
-            SearchLimits {
-                max_backward,
-                max_distance,
-                search_depth,
-            },
-        );
-
-        if result.score > MIN_SCORE {
-            let mut delayed = 0_usize;
-            while delayed < max_lazy_delays {
-                let next_position = position + 1;
-                let next_max_backward = next_position.min(max_backward_distance);
-                let next = hasher.find_longest_match(
-                    input,
-                    recent_distances.values(),
-                    next_position,
-                    end - next_position,
-                    SearchLimits {
-                        max_backward: next_max_backward,
-                        max_distance,
-                        search_depth,
-                    },
-                );
-                if next.score >= result.score + LAZY_SCORE_DELTA {
-                    position = next_position;
-                    insert_length += 1;
-                    result = next;
-                    delayed += 1;
-                    if position + HASH_TYPE_LENGTH >= end {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            apply_random_heuristics = position
-                .saturating_add(2 * result.length)
-                .saturating_add(RANDOM_HEURISTICS_WINDOW);
-            let max_backward = position.min(max_backward_distance);
-            let distance_code = recent_distances.compute_code(result.distance, max_backward);
-            if result.distance <= max_backward && distance_code != 0 {
-                recent_distances.push(result.distance);
-            }
-
-            commands.push(MatchCommand {
-                insert_start,
-                insert_length,
-                copy_length: result.length,
-                copy_length_code: result.length_code,
-                distance: result.distance,
-                distance_code,
-            });
-
-            let mut range_start = position + 2;
-            let range_end = (position + result.length).min(store_end);
-            if result.distance < (result.length >> 2) {
-                range_start = range_start
-                    .max(position + result.length - (result.distance << 2))
-                    .min(range_end);
-            }
-            hasher.store_range(input, range_start, range_end);
-
-            position += result.length;
-            insert_start = position;
-            insert_length = 0;
-        } else {
-            insert_length += 1;
-            position += 1;
-
-            if position > apply_random_heuristics {
-                if position > apply_random_heuristics + 4 * RANDOM_HEURISTICS_WINDOW {
-                    let margin = (STORE_LOOKAHEAD - 1).max(4);
-                    let jump_end = (position + 16).min(end.saturating_sub(margin));
-                    while position < jump_end {
-                        hasher.store(input, position);
-                        position += 4;
-                        insert_length += 4;
-                    }
-                } else {
-                    let margin = (STORE_LOOKAHEAD - 1).max(2);
-                    let jump_end = (position + 8).min(end.saturating_sub(margin));
-                    while position < jump_end {
-                        hasher.store(input, position);
-                        position += 2;
-                        insert_length += 2;
-                    }
-                }
-            }
-        }
-    }
-
-    Parse {
-        commands,
-        tail_start: insert_start,
-    }
+    let mut finder = MatchFinder::new(
+        max_backward_distance,
+        max_distance,
+        search_depth,
+        max_lazy_delays,
+    );
+    finder.parse_chunk(input, 0)
 }
 
 fn hash4(input: &[u8], position: usize) -> usize {

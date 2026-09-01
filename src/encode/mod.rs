@@ -116,8 +116,11 @@ pub(super) fn compress_with_options(
 }
 
 fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
-    if input.is_empty() || input.len() > MAX_META_BLOCK_SIZE {
+    if input.is_empty() {
         return compress_stored(input, config);
+    }
+    if input.len() > MAX_META_BLOCK_SIZE {
+        return try_compress_stream_or_fallback(input, config);
     }
 
     if let Some(candidate) = try_periodic_compressed(input, config) {
@@ -153,6 +156,18 @@ fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
         return choose_against_stored(input, candidate, config);
     }
 
+    compress_stored(input, config)
+}
+
+/// Greedy multi-metablock compression for inputs above the single-metablock
+/// cap, falling back to all-stored output when the parse finds no commands.
+fn try_compress_stream_or_fallback(input: &[u8], config: EncoderConfig) -> Vec<u8> {
+    if config.quality() != 0
+        && let Some(candidate) = greedy::try_compress_stream(input, config)
+        && candidate.len() < compress_stored(input, config).len()
+    {
+        return candidate;
+    }
     compress_stored(input, config)
 }
 
@@ -340,14 +355,23 @@ fn write_window_bits(writer: &mut BitWriter, window_bits: u8) {
     }
 }
 
-fn write_final_compressed_header(writer: &mut BitWriter, length: usize) {
+fn write_compressed_metablock_header(writer: &mut BitWriter, length: usize, is_last: bool) {
     assert!((1..=MAX_META_BLOCK_SIZE).contains(&length));
 
-    writer.write_bits(1, 1); // ISLAST
-    writer.write_bits(0, 1); // ISLASTEMPTY
+    writer.write_bits(u64::from(is_last), 1); // ISLAST
+    if is_last {
+        writer.write_bits(0, 1); // ISLASTEMPTY
+    }
     let nibbles = nibbles_for_length(length);
     writer.write_bits(u64::from(nibbles - 4), 2); // MNIBBLES
     writer.write_bits((length - 1) as u64, nibbles * 4); // MLEN - 1
+    if !is_last {
+        writer.write_bits(0, 1); // ISUNCOMPRESSED
+    }
+}
+
+fn write_final_compressed_header(writer: &mut BitWriter, length: usize) {
+    write_compressed_metablock_header(writer, length, true);
 }
 
 fn write_simple_compressed_header(

@@ -62,6 +62,10 @@ impl RecentDistances {
         self.values[0] = distance;
     }
 
+    pub(super) fn restore(&mut self, snapshot: [usize; 4]) {
+        self.values = snapshot;
+    }
+
     #[cfg(test)]
     pub(super) fn encode(&mut self, distance: usize, direct_codes: u16) -> DistanceCode {
         let raw_code = self.compute_code(distance, usize::MAX);

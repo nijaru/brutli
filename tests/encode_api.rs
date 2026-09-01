@@ -104,3 +104,50 @@ fn compression_rejects_invalid_window_sizes() {
         );
     }
 }
+
+#[test]
+fn large_input_compresses_across_multiple_metablocks() {
+    // Repeating text above the 16 MiB single-metablock cap: at least two
+    // metablocks, each individually compressed, round-tripping through both
+    // Brutli and the reference decoder.
+    let unit = b"the quick brown fox jumps over the lazy dog. ".repeat(96);
+    let mut source = unit.repeat(((1_usize << 24) / unit.len()) + 2);
+    source.truncate((1_usize << 24) + 4096);
+
+    let encoded = brutli::compress(&source);
+    assert!(encoded.len() < source.len() / 8);
+    assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+
+    let mut decoded = vec![0_u8; source.len() + 1];
+    let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
+    assert!(matches!(
+        info.result,
+        brotli_decompressor::BrotliResult::ResultSuccess
+    ));
+    assert_eq!(info.decoded_size, source.len());
+    assert_eq!(&decoded[..info.decoded_size], &source[..]);
+}
+
+#[test]
+fn large_random_input_falls_back_to_stored_metablocks() {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut source = vec![0_u8; (1_usize << 24) + 64];
+    for chunk in source.as_chunks_mut::<8>().0 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        chunk.copy_from_slice(&state.to_le_bytes());
+    }
+
+    let encoded = brutli::compress(&source);
+    assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+
+    let mut decoded = vec![0_u8; source.len() + 1];
+    let info = brotli_decompressor::brotli_decode(&encoded, &mut decoded);
+    assert!(matches!(
+        info.result,
+        brotli_decompressor::BrotliResult::ResultSuccess
+    ));
+    assert_eq!(info.decoded_size, source.len());
+    assert_eq!(&decoded[..info.decoded_size], &source[..]);
+}

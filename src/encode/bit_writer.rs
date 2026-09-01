@@ -45,6 +45,21 @@ impl BitWriter {
         self.bytes.len() * 8 + usize::from(self.used)
     }
 
+    /// Appends every bit written to `other`, preserving bit alignment.
+    pub(super) fn append_writer(&mut self, other: BitWriter) {
+        let BitWriter {
+            bytes,
+            pending,
+            used,
+        } = other;
+        for byte in bytes {
+            self.write_bits(u64::from(byte), 8);
+        }
+        if used > 0 {
+            self.write_bits(pending & low_mask(used), used);
+        }
+    }
+
     pub(super) fn align_to_byte(&mut self) {
         if self.used == 0 {
             return;
@@ -135,6 +150,20 @@ mod tests {
         assert_eq!(writer.bit_len(), 3);
         writer.write_bits(0xff, 8);
         assert_eq!(writer.bit_len(), 11);
+    }
+
+    #[test]
+    fn append_writer_preserves_bit_alignment() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(0b101, 3);
+
+        let mut tail = BitWriter::default();
+        tail.write_bits(0b0110, 4);
+        tail.write_bits(0x1f, 5);
+        writer.append_writer(tail);
+
+        assert_eq!(writer.bit_len(), 12);
+        assert_eq!(writer.finish(), vec![181, 15]);
     }
 
     #[test]

@@ -89,7 +89,8 @@ let smaller_window = brutli::compress_with_window_bits(b"Brotli data", 16)?;
 
 Its current baseline includes:
 
-- RFC 7932 stream and meta-block framing.
+- RFC 7932 stream and meta-block framing, including multi-metablock streams
+  for inputs larger than the 16 MiB single-metablock cap.
 - A bounded two-candidate-per-hash LZ77 matcher with compact `u32` positions.
 - One-step lazy matching for short copies using an approximate format-bit cost.
 - Frequency-weighted canonical Huffman generation with a valid 15-bit fallback.
@@ -99,7 +100,7 @@ Its current baseline includes:
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Streaming operations remain future RFC 7932 work.
+Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Inputs above 16 MiB are compressed as a sequence of greedy metablocks, each choosing its compressed or stored form, with the match-finder window and recent-distance state carried across metablock boundaries. Streaming operations remain future RFC 7932 work.
 
 ## Goals
 
