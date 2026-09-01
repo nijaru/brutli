@@ -12,8 +12,7 @@ use prefix_code::{
     PrefixEncoding, write_simple_prefix_code, write_simple_symbol, write_var_len_u8,
 };
 
-use crate::EncodeError;
-
+use crate::{EncodeError, EncoderOptions};
 pub(super) const DEFAULT_WINDOW_BITS: u8 = 22;
 const MIN_WINDOW_BITS: u8 = 10;
 const MAX_WINDOW_BITS: u8 = 24;
@@ -76,20 +75,21 @@ const DIRECT_DISTANCE_CODES: u16 = 4;
 const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_DISTANCE_CODES;
 
 pub(super) fn compress(input: &[u8]) -> Vec<u8> {
-    compress_with_window_bits(input, DEFAULT_WINDOW_BITS)
-        .expect("the default RFC 7932 window bits are valid")
+    compress_with_options(
+        input,
+        EncoderOptions {
+            quality: 5,
+            window_bits: DEFAULT_WINDOW_BITS,
+        },
+    )
+    .expect("the default RFC 7932 encoder options are valid")
 }
 
-pub(super) fn compress_with_window_bits(
+pub(super) fn compress_with_options(
     input: &[u8],
-    window_bits: u8,
+    options: EncoderOptions,
 ) -> Result<Vec<u8>, EncodeError> {
-    let config = EncoderConfig::new(window_bits, 5)?;
-    Ok(compress_with_config(input, config))
-}
-
-pub(super) fn compress_with_quality(input: &[u8], quality: u8) -> Result<Vec<u8>, EncodeError> {
-    let config = EncoderConfig::new(DEFAULT_WINDOW_BITS, quality)?;
+    let config = EncoderConfig::new(options.window_bits, options.quality)?;
     Ok(compress_with_config(input, config))
 }
 

@@ -222,6 +222,24 @@ impl Decoder {
     }
 }
 
+/// Options controlling one-shot Brotli encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderOptions {
+    /// Quality level from `0` (fastest) through `11` (slowest).
+    pub quality: u8,
+    /// RFC 7932 window bits from `10` through `24`.
+    pub window_bits: u8,
+}
+
+impl Default for EncoderOptions {
+    fn default() -> Self {
+        Self {
+            quality: 5,
+            window_bits: 22,
+        }
+    }
+}
+
 /// Errors reported while encoding a Brotli stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -265,13 +283,31 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
     encode::compress(input)
 }
 
+/// Encodes one complete Brotli stream with explicit encoder options.
+///
+/// Quality values `0..=11` and RFC 7932 window values `10..=24` are accepted.
+/// The current implementation remains a partial upstream-compatible encoder;
+/// mode and streaming controls are not part of [`EncoderOptions`] yet.
+pub fn compress_with_options(
+    input: &[u8],
+    options: EncoderOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    encode::compress_with_options(input, options)
+}
+
 /// Encodes one complete RFC 7932 Brotli stream with a selected window size.
 ///
 /// `window_bits` must be in the RFC 7932 range `10..=24`. The window size is
 /// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder; mode and
 /// streaming controls are not exposed yet.
 pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8>, EncodeError> {
-    encode::compress_with_window_bits(input, window_bits)
+    compress_with_options(
+        input,
+        EncoderOptions {
+            window_bits,
+            ..EncoderOptions::default()
+        },
+    )
 }
 
 /// Encodes one complete Brotli stream using a selected quality level and the
@@ -282,7 +318,13 @@ pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8
 /// upstream-compatible implementation; mode and streaming controls are not
 /// exposed yet.
 pub fn compress_with_quality(input: &[u8], quality: u8) -> Result<Vec<u8>, EncodeError> {
-    encode::compress_with_quality(input, quality)
+    compress_with_options(
+        input,
+        EncoderOptions {
+            quality,
+            ..EncoderOptions::default()
+        },
+    )
 }
 
 /// Decompresses one complete Brotli stream into a `Vec<u8>`.
