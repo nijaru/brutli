@@ -26,6 +26,26 @@ fn compression_accepts_all_rfc_window_sizes() {
 }
 
 #[test]
+fn compression_accepts_all_quality_levels() {
+    let source = b"abcd".repeat(4096);
+
+    for quality in 0..=11 {
+        let encoded = brutli::compress_with_quality(&source, quality).unwrap();
+        assert_eq!(decompress(&encoded, source.len()).unwrap(), source);
+    }
+}
+
+#[test]
+fn compression_rejects_invalid_quality_levels() {
+    for quality in [12, u8::MAX] {
+        assert_eq!(
+            brutli::compress_with_quality(b"Brotli data", quality),
+            Err(EncodeError::InvalidQuality { quality })
+        );
+    }
+}
+
+#[test]
 fn compression_rejects_invalid_window_sizes() {
     for window_bits in [0, 9, 25, u8::MAX] {
         assert_eq!(

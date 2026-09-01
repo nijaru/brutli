@@ -71,8 +71,13 @@ pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
         return None;
     }
 
-    let parse =
-        create_backward_references(input, config.max_backward_distance(), config.max_distance());
+    let parse = create_backward_references(
+        input,
+        config.max_backward_distance(),
+        config.max_distance(),
+        config.search_depth(),
+        config.max_lazy_delays(),
+    );
     if parse.commands.is_empty() {
         return None;
     }
@@ -557,7 +562,7 @@ mod tests {
     use crate::decompress;
 
     fn default_config() -> EncoderConfig {
-        EncoderConfig::new(DEFAULT_WINDOW_BITS).unwrap()
+        EncoderConfig::new(DEFAULT_WINDOW_BITS, 5).unwrap()
     }
 
     #[test]

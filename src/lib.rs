@@ -226,6 +226,11 @@ impl Decoder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncodeError {
+    /// The requested quality is outside the Brotli range `0..=11`.
+    InvalidQuality {
+        /// The rejected quality value.
+        quality: u8,
+    },
     /// The requested `WBITS` value is outside the RFC 7932 range `10..=24`.
     InvalidWindowBits {
         /// The rejected `WBITS` value.
@@ -236,6 +241,9 @@ pub enum EncodeError {
 impl fmt::Display for EncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidQuality { quality } => {
+                write!(formatter, "Brotli quality must be in 0..=11, got {quality}")
+            }
             Self::InvalidWindowBits { window_bits } => write!(
                 formatter,
                 "RFC 7932 window bits must be in 10..=24, got {window_bits}"
@@ -260,10 +268,21 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 /// Encodes one complete RFC 7932 Brotli stream with a selected window size.
 ///
 /// `window_bits` must be in the RFC 7932 range `10..=24`. The window size is
-/// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder; quality,
-/// mode, and streaming controls are not exposed yet.
+/// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder; mode and
+/// streaming controls are not exposed yet.
 pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8>, EncodeError> {
     encode::compress_with_window_bits(input, window_bits)
+}
+
+/// Encodes one complete Brotli stream using a selected quality level and the
+/// default `WBITS=22` window.
+///
+/// Quality values from `0` through `11` are accepted. Higher values spend more
+/// work searching for matches. This one-shot encoder is still a partial
+/// upstream-compatible implementation; mode and streaming controls are not
+/// exposed yet.
+pub fn compress_with_quality(input: &[u8], quality: u8) -> Result<Vec<u8>, EncodeError> {
+    encode::compress_with_quality(input, quality)
 }
 
 /// Decompresses one complete Brotli stream into a `Vec<u8>`.

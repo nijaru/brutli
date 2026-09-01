@@ -23,14 +23,21 @@ const MAX_DISTANCE: usize = 0x3ff_fffc;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct EncoderConfig {
     window_bits: u8,
+    quality: u8,
 }
 
 impl EncoderConfig {
-    fn new(window_bits: u8) -> Result<Self, EncodeError> {
+    fn new(window_bits: u8, quality: u8) -> Result<Self, EncodeError> {
+        if quality > 11 {
+            return Err(EncodeError::InvalidQuality { quality });
+        }
         if !(MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&window_bits) {
             return Err(EncodeError::InvalidWindowBits { window_bits });
         }
-        Ok(Self { window_bits })
+        Ok(Self {
+            window_bits,
+            quality,
+        })
     }
 
     pub(super) const fn window_bits(self) -> u8 {
@@ -43,6 +50,23 @@ impl EncoderConfig {
 
     pub(super) const fn max_distance(self) -> usize {
         MAX_DISTANCE
+    }
+
+    pub(super) const fn quality(self) -> u8 {
+        self.quality
+    }
+
+    pub(super) const fn search_depth(self) -> usize {
+        match self.quality {
+            0 | 1 => 1,
+            2 => 4,
+            3 | 4 => 8,
+            _ => 16,
+        }
+    }
+
+    pub(super) const fn max_lazy_delays(self) -> usize {
+        if self.quality >= 5 { 4 } else { 0 }
     }
 }
 const LITERAL_ALPHABET_SIZE: u16 = 256;
@@ -60,7 +84,12 @@ pub(super) fn compress_with_window_bits(
     input: &[u8],
     window_bits: u8,
 ) -> Result<Vec<u8>, EncodeError> {
-    let config = EncoderConfig::new(window_bits)?;
+    let config = EncoderConfig::new(window_bits, 5)?;
+    Ok(compress_with_config(input, config))
+}
+
+pub(super) fn compress_with_quality(input: &[u8], quality: u8) -> Result<Vec<u8>, EncodeError> {
+    let config = EncoderConfig::new(DEFAULT_WINDOW_BITS, quality)?;
     Ok(compress_with_config(input, config))
 }
 
@@ -73,7 +102,9 @@ fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
         return choose_against_stored(input, candidate, config);
     }
 
-    if let Some(candidate) = greedy::try_compress(input, config) {
+    if config.quality() != 0
+        && let Some(candidate) = greedy::try_compress(input, config)
+    {
         if candidate.len() <= input.len() {
             return candidate;
         }
@@ -348,7 +379,7 @@ mod tests {
     use crate::{DecodeError, Decoder, compress_with_window_bits, decompress};
 
     fn default_config() -> EncoderConfig {
-        EncoderConfig::new(DEFAULT_WINDOW_BITS).unwrap()
+        EncoderConfig::new(DEFAULT_WINDOW_BITS, 5).unwrap()
     }
 
     #[test]

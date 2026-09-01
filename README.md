@@ -99,7 +99,7 @@ Its current baseline includes:
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-The encoder deliberately does not expose quality levels, modes, or streaming operations yet. Its current parser is a single greedy strategy; deeper quality-specific parsing and complete upstream parameter behavior remain future RFC 7932 work.
+Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. Modes and streaming operations remain future RFC 7932 work.
 
 ## Goals
 
