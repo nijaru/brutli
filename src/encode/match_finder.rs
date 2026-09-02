@@ -18,6 +18,9 @@ const MIN_SCORE: usize = SCORE_BASE + 100;
 const LAZY_SCORE_DELTA: usize = 175;
 const RANDOM_HEURISTICS_WINDOW: usize = 64;
 const MATCH_WORD_BYTES: usize = 8;
+/// Hash-bucket sentinel for positions that fell out of the window after
+/// compaction; such entries are skipped during bucket scans.
+const NO_POSITION: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MatchCommand {
@@ -76,6 +79,26 @@ impl MatchFinder {
 
     pub(super) fn restore_distances(&mut self, snapshot: [usize; 4]) {
         self.recent_distances.restore(snapshot);
+    }
+
+    /// Compacts the position space after the caller dropped `dropped` bytes
+    /// from the front of the window: hashed positions shift down, and entries
+    /// that fell out of the window become stale and are skipped by bucket
+    /// scans.
+    pub(super) fn compact(&mut self, dropped: usize) {
+        self.hasher.remap_positions(dropped);
+        self.position = self.position.saturating_sub(dropped);
+        self.apply_random_heuristics = self.apply_random_heuristics.saturating_sub(dropped);
+    }
+
+    pub(super) fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Advances the parse frontier without parsing, for quality levels whose
+    /// metablocks are emitted without the greedy path.
+    pub(super) fn set_position(&mut self, position: usize) {
+        self.position = position;
     }
 
     /// Parses the chunk ending at `input.len()`, starting from the stream
@@ -276,6 +299,27 @@ impl QualityFiveHasher {
         unsafe { *self.buckets[offset].assume_init_ref() as usize }
     }
 
+    fn remap_positions(&mut self, dropped: usize) {
+        for key in 0..BUCKET_COUNT {
+            let initialized = usize::from(self.counts[key]).min(BLOCK_SIZE);
+            for slot in 0..initialized {
+                let offset = (key << BLOCK_BITS) + slot;
+                // SAFETY: `initialized` is min(count, BLOCK_SIZE), and every
+                // slot below that bound has been written by `store` (the ring
+                // wraps only after all BLOCK_SIZE slots are initialized).
+                let position = unsafe { self.buckets[offset].assume_init_read() };
+                let shifted = if position == NO_POSITION {
+                    NO_POSITION
+                } else {
+                    (position as usize)
+                        .checked_sub(dropped)
+                        .map_or(NO_POSITION, |value| value as u32)
+                };
+                self.buckets[offset].write(shifted);
+            }
+        }
+    }
+
     fn find_longest_match(
         &mut self,
         input: &[u8],
@@ -331,6 +375,9 @@ impl QualityFiveHasher {
         let oldest = count.saturating_sub(limits.search_depth.min(BLOCK_SIZE));
         for index in (oldest..count).rev() {
             let previous = self.bucket_position(bucket_start + (index & BLOCK_MASK));
+            if previous == NO_POSITION as usize {
+                continue;
+            }
             debug_assert!(previous < position);
             let backward = position - previous;
             if backward > limits.max_backward {

@@ -100,7 +100,42 @@ Its current baseline includes:
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Inputs above 16 MiB are compressed as a sequence of greedy metablocks, each choosing its compressed or stored form, with the match-finder window and recent-distance state carried across metablock boundaries. Streaming operations remain future RFC 7932 work.
+Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Inputs above 16 MiB are compressed as a sequence of greedy metablocks, each choosing its compressed or stored form, with the match-finder window and recent-distance state carried across metablock boundaries.
+
+### Incremental encoding
+
+`Encoder` mirrors the decoder's incremental API: it consumes uncompressed input through `process`, bounds output by the supplied slice, and terminates the stream with `finish`:
+
+```rust
+use brutli::{EncodeStatus, Encoder};
+
+let mut encoder = Encoder::new();
+let mut input = /* uncompressed bytes */;
+let mut output = Vec::new();
+let mut buffer = [0_u8; 8192];
+
+let mut consumed = 0_usize;
+while consumed < input.len() {
+    let progress = encoder.process(&input[consumed..], &mut buffer);
+    consumed += progress.consumed;
+    output.extend_from_slice(&buffer[..progress.produced]);
+}
+loop {
+    let progress = encoder.finish(&mut buffer);
+    output.extend_from_slice(&buffer[..progress.produced]);
+    if progress.status == EncodeStatus::Done {
+        break;
+    }
+}
+# let _ = output;
+```
+
+`process` consumes all supplied input in one call; `NeedOutput` only means the
+output slice filled and more bytes are queued internally. `finish` is
+idempotent, and input supplied after `Done` is rejected without being
+consumed. Window history is compacted once it exceeds the configured window
+size, so memory stays bounded regardless of stream length. Output is
+byte-identical to the one-shot API for the same input and options.
 
 ## Goals
 

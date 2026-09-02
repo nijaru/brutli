@@ -254,6 +254,88 @@ impl Default for EncoderOptions {
     }
 }
 
+/// The resource the incremental encoder needs next, or completion of the
+/// stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeStatus {
+    /// More uncompressed input is required. All previously supplied input has
+    /// been consumed.
+    NeedInput,
+    /// More output space is required to drain already-encoded bytes.
+    NeedOutput,
+    /// The Brotli stream is complete; the encoder accepts no further input.
+    Done,
+}
+
+/// Progress made by one incremental encoder call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeProgress {
+    /// Number of bytes consumed from the supplied input slice.
+    pub consumed: usize,
+    /// Number of bytes written to the supplied output slice.
+    pub produced: usize,
+    /// What the encoder needs next.
+    pub status: EncodeStatus,
+}
+
+/// Incremental RFC 7932 Brotli encoder.
+///
+/// `Encoder` retains only encoding state between calls. It never stores
+/// references to caller-provided input or output buffers.
+#[derive(Debug)]
+pub struct Encoder {
+    core: encode::stream::StreamEncoder,
+}
+
+impl Encoder {
+    /// Creates an encoder with the default options (quality 5, `WBITS=22`,
+    /// generic mode).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_options(EncoderOptions::default())
+            .expect("the default RFC 7932 encoder options are valid")
+    }
+
+    /// Creates an encoder with explicit options.
+    ///
+    /// Quality values `0..=11` and RFC 7932 window values `10..=24` are
+    /// accepted.
+    pub fn with_options(options: EncoderOptions) -> Result<Self, EncodeError> {
+        let config = encode::encoder_config(options)?;
+        Ok(Self {
+            core: encode::stream::StreamEncoder::new(config),
+        })
+    }
+
+    /// Consumes uncompressed input and writes compressed bytes into `output`.
+    ///
+    /// All supplied input is consumed in one call; `output.len()` bounds the
+    /// bytes drained. A `NeedOutput` result means the output slice filled;
+    /// call again (with more input or the same input remainder) to drain. A
+    /// `NeedInput` result means the encoder has consumed everything and needs
+    /// more input or [`Self::finish`].
+    pub fn process(&mut self, input: &[u8], output: &mut [u8]) -> EncodeProgress {
+        self.core.process(input, output)
+    }
+
+    /// Declares that no more input is available, flushes the remaining
+    /// buffered input as final metablocks, terminates the stream, and drains
+    /// output.
+    ///
+    /// If output fills first, call `finish` again with additional output
+    /// space. Once [`EncodeStatus::Done`] is returned the encoder accepts no
+    /// further input.
+    pub fn finish(&mut self, output: &mut [u8]) -> EncodeProgress {
+        self.core.finish(output)
+    }
+}
+
+impl Default for Encoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Errors reported while encoding a Brotli stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

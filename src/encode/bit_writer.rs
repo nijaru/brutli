@@ -60,6 +60,33 @@ impl BitWriter {
         }
     }
 
+    /// Copies completed bytes into `output`, retaining any that do not fit.
+    /// Returns the number of bytes copied. Sub-byte remainders stay pending so
+    /// the stream can continue from them later.
+    pub(super) fn drain_bytes(&mut self, output: &mut [u8]) -> usize {
+        self.flush_complete_pending();
+        let count = output.len().min(self.bytes.len());
+        output[..count].copy_from_slice(&self.bytes[..count]);
+        self.bytes.drain(..count);
+        count
+    }
+
+    /// Number of bytes immediately available to [`Self::drain_bytes`].
+    pub(super) fn queued_bytes(&mut self) -> usize {
+        self.flush_complete_pending();
+        self.bytes.len()
+    }
+
+    fn flush_complete_pending(&mut self) {
+        let whole_bits = usize::from(self.used) & !7;
+        if whole_bits > 0 {
+            let pending = self.pending.to_le_bytes();
+            self.bytes.extend_from_slice(&pending[..whole_bits / 8]);
+            self.pending >>= whole_bits;
+            self.used -= whole_bits as u8;
+        }
+    }
+
     pub(super) fn align_to_byte(&mut self) {
         if self.used == 0 {
             return;
@@ -164,6 +191,27 @@ mod tests {
 
         assert_eq!(writer.bit_len(), 12);
         assert_eq!(writer.finish(), vec![181, 15]);
+    }
+
+    #[test]
+    fn drain_bytes_retains_overflow_and_resumes() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(0xdeadbeef, 32);
+
+        let mut output = [0_u8; 2];
+        assert_eq!(writer.drain_bytes(&mut output), 2);
+        assert_eq!(output, [0xef, 0xbe]);
+        assert_eq!(writer.queued_bytes(), 2);
+
+        writer.write_bits(0xa5, 3);
+        let mut rest = [0_u8; 8];
+        assert_eq!(writer.drain_bytes(&mut rest), 2);
+        assert_eq!(&rest[..2], &[0xad, 0xde]);
+        assert_eq!(writer.queued_bytes(), 0);
+
+        // The three pending bits stay unaligned until a full byte completes.
+        let mut none = [0_u8; 8];
+        assert_eq!(writer.drain_bytes(&mut none), 0);
     }
 
     #[test]

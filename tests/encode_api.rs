@@ -151,3 +151,135 @@ fn large_random_input_falls_back_to_stored_metablocks() {
     assert_eq!(info.decoded_size, source.len());
     assert_eq!(&decoded[..info.decoded_size], &source[..]);
 }
+
+#[test]
+fn incremental_encoder_matches_one_shot_output() {
+    let source = b"the quick brown fox jumps over the lazy dog. ".repeat(96);
+
+    // Byte-identical output regardless of feed granularity, including the
+    // trivially small buffer sizes that exercise the drain loop.
+    for chunk_size in [1, 3, 17, 1024, source.len()] {
+        let mut encoder = brutli::Encoder::new();
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 16];
+
+        for chunk in source.chunks(chunk_size) {
+            let mut consumed = 0_usize;
+            loop {
+                let progress = encoder.process(&chunk[consumed..], &mut buffer);
+                consumed += progress.consumed;
+                output.extend_from_slice(&buffer[..progress.produced]);
+                match progress.status {
+                    brutli::EncodeStatus::NeedOutput => continue,
+                    brutli::EncodeStatus::NeedInput => break,
+                    brutli::EncodeStatus::Done => panic!("process must not finish the stream"),
+                }
+            }
+            assert_eq!(consumed, chunk.len());
+        }
+
+        loop {
+            let progress = encoder.finish(&mut buffer);
+            output.extend_from_slice(&buffer[..progress.produced]);
+            match progress.status {
+                brutli::EncodeStatus::Done => break,
+                brutli::EncodeStatus::NeedOutput => continue,
+                brutli::EncodeStatus::NeedInput => unreachable!("finish needs no input"),
+            }
+        }
+
+        assert_eq!(output, brutli::compress(&source));
+        assert_eq!(decompress(&output, source.len()).unwrap(), source);
+    }
+}
+
+#[test]
+fn incremental_encoder_drains_large_streams_incrementally() {
+    let unit = b"the quick brown fox jumps over the lazy dog. ".repeat(96);
+    let mut source = unit.repeat((16_usize << 20) / unit.len() + 2);
+    source.truncate((16_usize << 20) + 4096);
+
+    let mut encoder = brutli::Encoder::new();
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut feed = 0_usize;
+
+    while feed < source.len() {
+        let progress = encoder.process(&source[feed..], &mut buffer);
+        feed += progress.consumed;
+        output.extend_from_slice(&buffer[..progress.produced]);
+    }
+    loop {
+        let progress = encoder.finish(&mut buffer);
+        output.extend_from_slice(&buffer[..progress.produced]);
+        if matches!(progress.status, brutli::EncodeStatus::Done) {
+            break;
+        }
+    }
+
+    assert_eq!(feed, source.len());
+    // Multi-metablock output matches the one-shot multi-metablock encoder.
+    assert_eq!(output, brutli::compress(&source));
+    assert_eq!(decompress(&output, source.len()).unwrap(), source);
+}
+
+#[test]
+fn incremental_encoder_rejects_input_after_done() {
+    let mut encoder = brutli::Encoder::new();
+    let mut buffer = [0_u8; 32];
+    loop {
+        let progress = encoder.finish(&mut buffer);
+        if matches!(progress.status, brutli::EncodeStatus::Done) {
+            break;
+        }
+    }
+
+    let progress = encoder.process(b"too late", &mut buffer);
+    assert_eq!(progress.consumed, 0);
+    assert!(matches!(progress.status, brutli::EncodeStatus::Done));
+}
+
+#[test]
+fn incremental_encoder_accepts_explicit_options() {
+    let source = b"alpha beta gamma delta epsilon zeta eta theta. ".repeat(64);
+
+    let mut encoder = brutli::Encoder::with_options(brutli::EncoderOptions {
+        quality: 9,
+        window_bits: 16,
+        mode: brutli::EncoderMode::Font,
+    })
+    .unwrap();
+
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 64];
+    let mut consumed = 0_usize;
+    loop {
+        let progress = encoder.process(&source[consumed..], &mut buffer);
+        consumed += progress.consumed;
+        output.extend_from_slice(&buffer[..progress.produced]);
+        if matches!(progress.status, brutli::EncodeStatus::NeedInput) {
+            break;
+        }
+    }
+    loop {
+        let progress = encoder.finish(&mut buffer);
+        output.extend_from_slice(&buffer[..progress.produced]);
+        if matches!(progress.status, brutli::EncodeStatus::Done) {
+            break;
+        }
+    }
+
+    assert_eq!(
+        output,
+        brutli::compress_with_options(
+            &source,
+            brutli::EncoderOptions {
+                quality: 9,
+                window_bits: 16,
+                mode: brutli::EncoderMode::Font,
+            }
+        )
+        .unwrap()
+    );
+    assert_eq!(decompress(&output, source.len()).unwrap(), source);
+}

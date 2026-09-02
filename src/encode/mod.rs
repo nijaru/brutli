@@ -5,6 +5,7 @@ mod greedy;
 mod match_finder;
 mod prefix_code;
 mod static_dictionary;
+pub(crate) mod stream;
 
 use bit_writer::BitWriter;
 use command::{ExplicitCommand, InsertCommand};
@@ -115,7 +116,11 @@ pub(super) fn compress_with_options(
     Ok(compress_with_config(input, config))
 }
 
-fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
+pub(crate) fn encoder_config(options: EncoderOptions) -> Result<EncoderConfig, EncodeError> {
+    EncoderConfig::new(options.window_bits, options.quality, options.mode)
+}
+
+pub(super) fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
     if input.is_empty() {
         return compress_stored(input, config);
     }

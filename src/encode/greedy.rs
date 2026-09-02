@@ -442,6 +442,68 @@ pub(super) fn try_compress(input: &[u8], config: EncoderConfig) -> Option<Vec<u8
 /// matches reference earlier output; per chunk the smaller of the compressed
 /// and stored forms is emitted, restoring the distance-cache snapshot when a
 /// chunk is stored.
+/// Emits one metablock covering the next chunk of `window` (starting at
+/// `chunk_start`, capped at `MAX_META_BLOCK_SIZE`), appending the chosen form
+/// to `writer` using `finder`'s persistent hash index and distance ring.
+/// Returns the window-relative end of the emitted range. When the stored form
+/// wins, the distance-cache snapshot is restored, mirroring upstream
+/// `saved_dist_cache`.
+pub(super) fn emit_chunk(
+    window: &[u8],
+    chunk_start: usize,
+    finder: &mut MatchFinder,
+    writer: &mut BitWriter,
+    config: EncoderConfig,
+    is_last: bool,
+) -> usize {
+    let chunk_end = (chunk_start + MAX_META_BLOCK_SIZE).min(window.len());
+    let snapshot = finder.snapshot_distances();
+    let parse = finder.parse_chunk(&window[..chunk_end], chunk_start);
+
+    let compressed = if parse.commands.is_empty() {
+        None
+    } else {
+        build_bundle(
+            &window[..chunk_end],
+            chunk_start,
+            config,
+            &parse.commands,
+            parse.tail_start,
+        )
+        .map(|bundle| {
+            let mut scratch = BitWriter::default();
+            bundle.write_best(
+                &mut scratch,
+                &window[..chunk_end],
+                is_last,
+                chunk_end - chunk_start,
+                0,
+            );
+            scratch
+        })
+    };
+
+    match compressed {
+        Some(scratch) if scratch.bit_len() < stored_chunk_bits(chunk_end - chunk_start) => {
+            writer.append_writer(scratch);
+        }
+        _ => {
+            finder.restore_distances(snapshot);
+            write_uncompressed_metablock(writer, &window[chunk_start..chunk_end]);
+            if is_last {
+                write_final_empty_metablock(writer);
+            }
+        }
+    }
+    chunk_end
+}
+
+/// Compresses an input larger than one metablock as a stream of greedy
+/// metablocks, each at most `MAX_META_BLOCK_SIZE` bytes. The match finder
+/// state (hash index and recent distances) persists across metablocks so
+/// matches reference earlier output; per chunk the smaller of the compressed
+/// and stored forms is emitted, restoring the distance-cache snapshot when a
+/// chunk is stored.
 pub(super) fn try_compress_stream(input: &[u8], config: EncoderConfig) -> Option<Vec<u8>> {
     if input.len() <= MAX_META_BLOCK_SIZE {
         return None;
@@ -458,47 +520,14 @@ pub(super) fn try_compress_stream(input: &[u8], config: EncoderConfig) -> Option
     let mut chunk_start = 0_usize;
 
     while chunk_start < input.len() {
-        let chunk_end = (chunk_start + MAX_META_BLOCK_SIZE).min(input.len());
-        let is_last = chunk_end == input.len();
-        let snapshot = finder.snapshot_distances();
-        let parse = finder.parse_chunk(&input[..chunk_end], chunk_start);
-
-        let compressed = if parse.commands.is_empty() {
-            None
-        } else {
-            build_bundle(
-                &input[..chunk_end],
-                chunk_start,
-                config,
-                &parse.commands,
-                parse.tail_start,
-            )
-            .map(|bundle| {
-                let mut scratch = BitWriter::default();
-                bundle.write_best(
-                    &mut scratch,
-                    &input[..chunk_end],
-                    is_last,
-                    chunk_end - chunk_start,
-                    0,
-                );
-                scratch
-            })
-        };
-
-        match compressed {
-            Some(scratch) if scratch.bit_len() < stored_chunk_bits(chunk_end - chunk_start) => {
-                writer.append_writer(scratch);
-            }
-            _ => {
-                finder.restore_distances(snapshot);
-                write_uncompressed_metablock(&mut writer, &input[chunk_start..chunk_end]);
-                if is_last {
-                    write_final_empty_metablock(&mut writer);
-                }
-            }
-        }
-        chunk_start = chunk_end;
+        chunk_start = emit_chunk(
+            input,
+            chunk_start,
+            &mut finder,
+            &mut writer,
+            config,
+            chunk_start + MAX_META_BLOCK_SIZE >= input.len(),
+        );
     }
 
     Some(writer.finish())
