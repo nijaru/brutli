@@ -234,9 +234,642 @@ fn hash14(input: &[u8]) -> usize {
     ((value.wrapping_mul(HASH_MULTIPLIER)) >> (32 - HASH_BITS)) as usize
 }
 
+// ---------------------------------------------------------------------------
+// Full transform-space dictionary search (`find_all`)
+//
+// An idiomatic port of upstream `BrotliFindAllStaticDictionaryMatchesFor`
+// (static_dict.c): finds every static-dictionary match through the complete
+// transform space — base words, omit-last cutoffs, the suffix table, the
+// uppercase transforms, and the " ", ".", "e ", "s ", ", ", U+00A0,
+// " the ", and ".com/" prefix forms — keeping the cheapest wire code per
+// match length, exactly as upstream `AddMatch` does.
+// ---------------------------------------------------------------------------
+
+/// Upstream `BrotliTransform*` ids for the LUT entry forms.
+const TRANSFORM_IDENTITY: u8 = 0;
+const TRANSFORM_UPPERCASE_FIRST: u8 = 10;
+const TRANSFORM_UPPERCASE_ALL: u8 = 11;
+
+/// Hash15 buckets: 15 bits of `kHashMul32`.
+const LUT_BUCKETS: usize = 1 << 15;
+
+/// Transform-space entries in upstream `kStaticDictionaryWords` (its slot 0
+/// is the unused 1-based sentinel, hence 31705 slots / 31704 entries).
+const LUT_ENTRY_COUNT: usize = 31704;
+
+/// Longest possible dictionary match: word (24) plus the longest suffix or
+/// prefix transform tail (" the " + word + " of the " = 13 bytes).
+const MAX_MATCH_LENGTH: usize = 37;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LutWord {
+    length: u8,
+    transform: u8,
+    index: u16,
+}
+
+#[derive(Debug)]
+struct DictionaryLut {
+    buckets: Vec<Vec<LutWord>>,
+}
+
+static DICTIONARY_LUT: OnceLock<DictionaryLut> = OnceLock::new();
+
+/// The effective bytes a LUT entry matches against: identity words as-is,
+/// uppercase-first with the first byte uppercased, uppercase-all with every
+/// ASCII lowercase byte uppercased.
+fn effective_word(entry: LutWord) -> Vec<u8> {
+    let word = dictionary::word(usize::from(entry.length), usize::from(entry.index))
+        .expect("LUT entry references a dictionary word");
+    match entry.transform {
+        TRANSFORM_UPPERCASE_FIRST => {
+            let mut transformed = word.to_vec();
+            transformed[0] -= 32;
+            transformed
+        }
+        TRANSFORM_UPPERCASE_ALL => word
+            .iter()
+            .map(|&byte| {
+                if byte.is_ascii_lowercase() {
+                    byte - 32
+                } else {
+                    byte
+                }
+            })
+            .collect(),
+        _ => word.to_vec(),
+    }
+}
+
+/// Builds the transform-space LUT: every dictionary word in identity form,
+/// plus uppercase-first and uppercase-all forms that are not already covered
+/// by an existing word of the same length (upstream
+/// `DoBrotliEncoderInitStaticDictionaryLut`). Bucket order is irrelevant to
+/// the search — every candidate competes for the cheapest code per length —
+/// but the dedup rules and the total entry count match upstream exactly.
+fn build_lut() -> DictionaryLut {
+    let mut buckets: Vec<Vec<LutWord>> = vec![Vec::new(); LUT_BUCKETS];
+    let mut total = 0_usize;
+
+    for length in MIN_WORD_LENGTH..=MAX_WORD_LENGTH {
+        let count = 1_usize << dictionary::size_bits(length);
+
+        for index in 0..count {
+            let word = dictionary::word(length, index).expect("dictionary word exists");
+            buckets[hash15(word)].push(LutWord {
+                length: length as u8,
+                transform: TRANSFORM_IDENTITY,
+                index: index as u16,
+            });
+            total += 1;
+        }
+
+        // Uppercase-first: lowercase-starting words whose capitalized form
+        // does not already appear as a base word of the same length.
+        for index in 0..count {
+            let word = dictionary::word(length, index).expect("dictionary word exists");
+            if !word[0].is_ascii_lowercase() {
+                continue;
+            }
+            let mut transformed = word.to_vec();
+            transformed[0] -= 32;
+            let key = hash15(&transformed);
+            let already = buckets[key].iter().any(|&entry| {
+                usize::from(entry.length) == length
+                    && dictionary::word(length, usize::from(entry.index))
+                        == Some(transformed.as_slice())
+            });
+            if already {
+                continue;
+            }
+            buckets[key].push(LutWord {
+                length: length as u8,
+                transform: TRANSFORM_UPPERCASE_FIRST,
+                index: index as u16,
+            });
+            total += 1;
+        }
+
+        // Uppercase-all: ASCII words containing a lowercase byte past the
+        // first whose all-caps form is not already covered by an identity,
+        // uppercase-first, or uppercase-all entry of the same length.
+        for index in 0..count {
+            let word = dictionary::word(length, index).expect("dictionary word exists");
+            if word.iter().any(|&byte| byte >= 128)
+                || !word.iter().skip(1).any(|&byte| byte.is_ascii_lowercase())
+            {
+                continue;
+            }
+            let transformed: Vec<u8> = word
+                .iter()
+                .map(|&byte| {
+                    if byte.is_ascii_lowercase() {
+                        byte - 32
+                    } else {
+                        byte
+                    }
+                })
+                .collect();
+            let key = hash15(&transformed);
+            let already = buckets[key]
+                .iter()
+                .any(|&entry| usize::from(entry.length) == length && effective_word(entry) == transformed);
+            if already {
+                continue;
+            }
+            buckets[key].push(LutWord {
+                length: length as u8,
+                transform: TRANSFORM_UPPERCASE_ALL,
+                index: index as u16,
+            });
+            total += 1;
+        }
+    }
+
+    assert_eq!(total, LUT_ENTRY_COUNT, "reference LUT entry count changed");
+    DictionaryLut { buckets }
+}
+
+fn hash15(word: &[u8]) -> usize {
+    let value = u32::from_le_bytes(
+        word[..4]
+            .try_into()
+            .expect("dictionary words have at least four bytes"),
+    );
+    value.wrapping_mul(HASH_MULTIPLIER) as usize >> 17
+}
+
+/// Common prefix of `word` and `data`, capped by both lengths (upstream
+/// `DictMatchLength`).
+fn dict_match_length(word: &[u8], data: &[u8]) -> usize {
+    word.iter()
+        .zip(data)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+/// Full uppercase-form match of `word` at the start of `data` (upstream
+/// `IsMatch` for transform 10 and 11 entries).
+fn uppercase_word_match(word: &[u8], data: &[u8], is_all_caps: bool) -> bool {
+    if word.len() > data.len() {
+        return false;
+    }
+    let head = &data[..word.len()];
+    if is_all_caps {
+        word.iter().zip(head).all(|(&left, &right)| {
+            if left.is_ascii_lowercase() {
+                right == left ^ 32
+            } else {
+                right == left
+            }
+        })
+    } else {
+        word[0].is_ascii_lowercase()
+            && head[0] == word[0] ^ 32
+            && word[1..] == head[1..]
+    }
+}
+
+/// Full identity match of `word` at `offset` into `data` (upstream `IsMatch`
+/// for transform-0 entries in the prefix ladders).
+fn word_fits(word: &[u8], data: &[u8], offset: usize) -> bool {
+    data.len() >= offset + word.len() && word == &data[offset..offset + word.len()]
+}
+
+/// A suffix-transform rule: when the bytes following the matched word (or
+/// word plus prefix) start with `suffix`, a match with transform
+/// `transform_id` and total length base + `extra` is added.
+struct SuffixRule {
+    suffix: &'static [u8],
+    transform_id: usize,
+    extra: usize,
+}
+
+/// Suffixes after a fully matched word (upstream's nested `s[0] == ...`
+/// ladders, flattened: upstream adds every rule along a matching path, so
+/// prefix-of-suffix matching is equivalent). `extra` counts beyond the word
+/// length. Scanned only under upstream's blanket guard
+/// `word_length + 6 < max_length`.
+const IDENTITY_SUFFIX_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 1, extra: 1 },
+    SuffixRule { suffix: b"\"", transform_id: 19, extra: 1 },
+    SuffixRule { suffix: b"\">", transform_id: 21, extra: 2 },
+    SuffixRule { suffix: b".", transform_id: 20, extra: 1 },
+    SuffixRule { suffix: b". ", transform_id: 31, extra: 2 },
+    SuffixRule { suffix: b". The ", transform_id: 43, extra: 6 },
+    SuffixRule { suffix: b". This ", transform_id: 75, extra: 7 },
+    SuffixRule { suffix: b",", transform_id: 76, extra: 1 },
+    SuffixRule { suffix: b", ", transform_id: 14, extra: 2 },
+    SuffixRule { suffix: b"\n", transform_id: 22, extra: 1 },
+    SuffixRule { suffix: b"\n\t", transform_id: 50, extra: 2 },
+    SuffixRule { suffix: b"]", transform_id: 24, extra: 1 },
+    SuffixRule { suffix: b"'", transform_id: 36, extra: 1 },
+    SuffixRule { suffix: b":", transform_id: 51, extra: 1 },
+    SuffixRule { suffix: b"(", transform_id: 57, extra: 1 },
+    SuffixRule { suffix: b"=\"", transform_id: 70, extra: 2 },
+    SuffixRule { suffix: b"='", transform_id: 86, extra: 2 },
+    SuffixRule { suffix: b"al ", transform_id: 84, extra: 3 },
+    SuffixRule { suffix: b"ed ", transform_id: 53, extra: 3 },
+    SuffixRule { suffix: b"er ", transform_id: 82, extra: 3 },
+    SuffixRule { suffix: b"est ", transform_id: 95, extra: 4 },
+    SuffixRule { suffix: b"ful ", transform_id: 90, extra: 4 },
+    SuffixRule { suffix: b"ive ", transform_id: 92, extra: 4 },
+    SuffixRule { suffix: b"ize ", transform_id: 100, extra: 4 },
+    SuffixRule { suffix: b"less ", transform_id: 93, extra: 5 },
+    SuffixRule { suffix: b"ly ", transform_id: 61, extra: 3 },
+    SuffixRule { suffix: b"ous ", transform_id: 106, extra: 4 },
+    SuffixRule { suffix: b" a ", transform_id: 28, extra: 3 },
+    SuffixRule { suffix: b" as ", transform_id: 46, extra: 4 },
+    SuffixRule { suffix: b" at ", transform_id: 60, extra: 4 },
+    SuffixRule { suffix: b" and ", transform_id: 10, extra: 5 },
+    SuffixRule { suffix: b" by ", transform_id: 38, extra: 4 },
+    SuffixRule { suffix: b" in ", transform_id: 16, extra: 4 },
+    SuffixRule { suffix: b" is ", transform_id: 47, extra: 4 },
+    SuffixRule { suffix: b" for ", transform_id: 25, extra: 5 },
+    SuffixRule { suffix: b" from ", transform_id: 37, extra: 6 },
+    SuffixRule { suffix: b" of ", transform_id: 8, extra: 4 },
+    SuffixRule { suffix: b" on ", transform_id: 45, extra: 4 },
+    SuffixRule { suffix: b" not ", transform_id: 80, extra: 5 },
+    SuffixRule { suffix: b" the ", transform_id: 5, extra: 5 },
+    SuffixRule { suffix: b" that ", transform_id: 29, extra: 6 },
+    SuffixRule { suffix: b" to ", transform_id: 17, extra: 4 },
+    SuffixRule { suffix: b" with ", transform_id: 35, extra: 6 },
+];
+
+/// Suffixes after an uppercase-first word match. `extra` beyond the word
+/// length; scanned under `word_length + 1 < max_length`.
+const UPPERCASE_FIRST_SUFFIX_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 4, extra: 1 },
+    SuffixRule { suffix: b"\"", transform_id: 66, extra: 1 },
+    SuffixRule { suffix: b"\">", transform_id: 69, extra: 2 },
+    SuffixRule { suffix: b".", transform_id: 79, extra: 1 },
+    SuffixRule { suffix: b". ", transform_id: 88, extra: 2 },
+    SuffixRule { suffix: b",", transform_id: 99, extra: 1 },
+    SuffixRule { suffix: b", ", transform_id: 58, extra: 2 },
+    SuffixRule { suffix: b"'", transform_id: 74, extra: 1 },
+    SuffixRule { suffix: b"(", transform_id: 78, extra: 1 },
+    SuffixRule { suffix: b"=\"", transform_id: 104, extra: 2 },
+    SuffixRule { suffix: b"='", transform_id: 108, extra: 2 },
+];
+
+/// Suffixes after an uppercase-all word match. Same guard as
+/// uppercase-first.
+const UPPERCASE_ALL_SUFFIX_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 68, extra: 1 },
+    SuffixRule { suffix: b"\"", transform_id: 87, extra: 1 },
+    SuffixRule { suffix: b"\">", transform_id: 97, extra: 2 },
+    SuffixRule { suffix: b".", transform_id: 101, extra: 1 },
+    SuffixRule { suffix: b". ", transform_id: 114, extra: 2 },
+    SuffixRule { suffix: b",", transform_id: 112, extra: 1 },
+    SuffixRule { suffix: b", ", transform_id: 107, extra: 2 },
+    SuffixRule { suffix: b"'", transform_id: 94, extra: 1 },
+    SuffixRule { suffix: b"(", transform_id: 113, extra: 1 },
+    SuffixRule { suffix: b"=\"", transform_id: 105, extra: 2 },
+    SuffixRule { suffix: b"='", transform_id: 116, extra: 2 },
+];
+
+/// Suffixes after a word matched at `data[1]` behind a `" "` prefix.
+/// `extra` beyond word + prefix (base match length + 1).
+const SPACE_PREFIX_SUFFIX_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 2, extra: 1 },
+    SuffixRule { suffix: b"(", transform_id: 89, extra: 1 },
+    SuffixRule { suffix: b",", transform_id: 103, extra: 1 },
+    SuffixRule { suffix: b", ", transform_id: 33, extra: 2 },
+    SuffixRule { suffix: b".", transform_id: 71, extra: 1 },
+    SuffixRule { suffix: b". ", transform_id: 52, extra: 2 },
+    SuffixRule { suffix: b"=\"", transform_id: 81, extra: 2 },
+    SuffixRule { suffix: b"='", transform_id: 98, extra: 2 },
+];
+
+/// Suffixes after a word matched at `data[1]` behind a `"."` prefix.
+const DOT_PREFIX_SUFFIX_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 77, extra: 1 },
+    SuffixRule { suffix: b"(", transform_id: 67, extra: 1 },
+];
+
+/// Suffixes after an uppercase-first word at `data[1]` behind a `" "`
+/// prefix.
+const SPACE_PREFIX_UPPERCASE_FIRST_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 15, extra: 1 },
+    SuffixRule { suffix: b",", transform_id: 109, extra: 1 },
+    SuffixRule { suffix: b", ", transform_id: 65, extra: 2 },
+    SuffixRule { suffix: b".", transform_id: 96, extra: 1 },
+    SuffixRule { suffix: b". ", transform_id: 91, extra: 2 },
+    SuffixRule { suffix: b"=\"", transform_id: 118, extra: 2 },
+    SuffixRule { suffix: b"='", transform_id: 120, extra: 2 },
+];
+
+/// Suffixes after an uppercase-all word at `data[1]` behind a `" "` prefix.
+const SPACE_PREFIX_UPPERCASE_ALL_RULES: &[SuffixRule] = &[
+    SuffixRule { suffix: b" ", transform_id: 83, extra: 1 },
+    SuffixRule { suffix: b", ", transform_id: 111, extra: 2 },
+    SuffixRule { suffix: b".", transform_id: 115, extra: 1 },
+    SuffixRule { suffix: b". ", transform_id: 117, extra: 2 },
+    SuffixRule { suffix: b"=\"", transform_id: 110, extra: 2 },
+    SuffixRule { suffix: b"='", transform_id: 119, extra: 2 },
+];
+
+/// The per-length best-match table: the minimum packed
+/// `(code << 5) | len_code` per match length, mirroring upstream `AddMatch`.
+struct MatchTable {
+    packed: [u32; MAX_MATCH_LENGTH + 1],
+}
+
+impl MatchTable {
+    fn new() -> Self {
+        Self {
+            packed: [u32::MAX; MAX_MATCH_LENGTH + 1],
+        }
+    }
+
+    fn add(&mut self, len: usize, code: usize, len_code: usize) {
+        if len == 0 || len > MAX_MATCH_LENGTH {
+            return;
+        }
+        let value = ((code << 5) + len_code) as u32;
+        if value < self.packed[len] {
+            self.packed[len] = value;
+        }
+    }
+
+    fn collect(self, max_backward: usize, max_distance: usize) -> Vec<DictionaryMatch> {
+        let mut result = Vec::new();
+        for (len, &value) in self.packed.iter().enumerate() {
+            if value == u32::MAX {
+                continue;
+            }
+            let code = (value >> 5) as usize;
+            let len_code = (value & 31) as usize;
+            let distance = max_backward + 1 + code;
+            if distance <= max_distance {
+                result.push(DictionaryMatch {
+                    length: len,
+                    length_code: len_code,
+                    distance,
+                    score: super::match_finder::backward_reference_score(len, distance),
+                });
+            }
+        }
+        result
+    }
+}
+
+impl DictionarySearch {
+    /// Finds every static-dictionary match at `position`, one per match
+    /// length (the cheapest code), in ascending length order — the
+    /// `find_all` counterpart of upstream `BrotliFindAllStaticDictionary
+    /// Matches`. `min_length` bounds the omit-last-cutoff ladder exactly as
+    /// upstream's `min_length` parameter; callers additionally filter the
+    /// returned lengths (the H10 matcher passes `max(4, best_len + 1)`).
+    /// Distances are wire distances: `max_backward + 1 + code`.
+    pub(super) fn find_all(
+        &mut self,
+        input: &[u8],
+        position: usize,
+        min_length: usize,
+        max_length: usize,
+        max_backward: usize,
+        max_distance: usize,
+    ) -> Vec<DictionaryMatch> {
+        let tail = &input[position..];
+        if tail.len() < MIN_WORD_LENGTH {
+            return Vec::new();
+        }
+        let data = &tail[..tail.len().min(max_length)];
+        if data.len() < MIN_WORD_LENGTH {
+            return Vec::new();
+        }
+
+        let table = DICTIONARY_LUT.get_or_init(build_lut);
+        let mut matches = MatchTable::new();
+
+        // Core scan: identity and uppercase forms of words matching at the
+        // head of `data` (upstream's Hash15 bucket walk).
+        for &entry in &table.buckets[hash15(&data[..4])] {
+            let length = usize::from(entry.length);
+            let index = usize::from(entry.index);
+            let count = 1_usize << dictionary::size_bits(length);
+
+            if entry.transform == TRANSFORM_IDENTITY {
+                let word = dictionary::word(length, index).expect("dictionary word exists");
+                let matchlen = dict_match_length(word, data);
+
+                // Full identity match.
+                if matchlen == length {
+                    matches.add(length, index, length);
+                }
+                // OMIT_LAST_1, and OMIT_LAST_1 + "ing ".
+                if matchlen + 1 >= length {
+                    matches.add(length - 1, index + 12 * count, length);
+                    if length + 2 < data.len()
+                        && data[length - 1] == b'i'
+                        && data[length] == b'n'
+                        && data[length + 1] == b'g'
+                        && data[length + 2] == b' '
+                    {
+                        matches.add(length + 3, index + 49 * count, length);
+                    }
+                }
+                // OMIT_LAST_# for # in 2..=9 (the cutoff transforms).
+                let minlen = if length > 9 {
+                    min_length.max(length - 9)
+                } else {
+                    min_length
+                };
+                let maxlen = matchlen.min(length - 2);
+                for len in minlen..=maxlen {
+                    let cut = length - len;
+                    let transform_id =
+                        (cut << 2) + ((CUTOFF_TRANSFORMS >> (cut * 6)) & 0x3f) as usize;
+                    matches.add(len, index + transform_id * count, length);
+                }
+                // Suffix transforms, under upstream's blanket margin.
+                if matchlen >= length && length + 6 < data.len() {
+                    for rule in IDENTITY_SUFFIX_RULES {
+                        if data[length..].starts_with(rule.suffix) {
+                            matches.add(
+                                length + rule.extra,
+                                index + rule.transform_id * count,
+                                length,
+                            );
+                        }
+                    }
+                }
+            } else {
+                let is_all_caps = entry.transform == TRANSFORM_UPPERCASE_ALL;
+                let word = dictionary::word(length, index).expect("dictionary word exists");
+                if uppercase_word_match(word, data, is_all_caps) {
+                    matches.add(
+                        length,
+                        index + if is_all_caps { 44 } else { 9 } * count,
+                        length,
+                    );
+                    if length + 1 < data.len() {
+                        for rule in if is_all_caps {
+                            UPPERCASE_ALL_SUFFIX_RULES
+                        } else {
+                            UPPERCASE_FIRST_SUFFIX_RULES
+                        } {
+                            if data[length..].starts_with(rule.suffix) {
+                                matches.add(
+                                    length + rule.extra,
+                                    index + rule.transform_id * count,
+                                    length,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Prefix " " and "." transforms: the word matches at data[1].
+        if data.len() >= 5 && (data[0] == b' ' || data[0] == b'.') {
+            let is_space = data[0] == b' ';
+            for &entry in &table.buckets[hash15(&data[1..5])] {
+                let length = usize::from(entry.length);
+                let index = usize::from(entry.index);
+                let count = 1_usize << dictionary::size_bits(length);
+
+                if entry.transform == TRANSFORM_IDENTITY {
+                    let word = dictionary::word(length, index).expect("dictionary word exists");
+                    if !word_fits(word, data, 1) {
+                        continue;
+                    }
+                    matches.add(
+                        length + 1,
+                        index + if is_space { 6 } else { 32 } * count,
+                        length,
+                    );
+                    if length + 2 < data.len() {
+                        for rule in if is_space {
+                            SPACE_PREFIX_SUFFIX_RULES
+                        } else {
+                            DOT_PREFIX_SUFFIX_RULES
+                        } {
+                            if data[length + 1..].starts_with(rule.suffix) {
+                                matches.add(
+                                    length + 1 + rule.extra,
+                                    index + rule.transform_id * count,
+                                    length,
+                                );
+                            }
+                        }
+                    }
+                } else if is_space {
+                    let is_all_caps = entry.transform == TRANSFORM_UPPERCASE_ALL;
+                    let word = dictionary::word(length, index).expect("dictionary word exists");
+                    if data.len() < 1 + word.len()
+                        || !uppercase_word_match(word, &data[1..], is_all_caps)
+                    {
+                        continue;
+                    }
+                    matches.add(
+                        length + 1,
+                        index + if is_all_caps { 85 } else { 30 } * count,
+                        length,
+                    );
+                    if length + 2 < data.len() {
+                        for rule in if is_all_caps {
+                            SPACE_PREFIX_UPPERCASE_ALL_RULES
+                        } else {
+                            SPACE_PREFIX_UPPERCASE_FIRST_RULES
+                        } {
+                            if data[length + 1..].starts_with(rule.suffix) {
+                                matches.add(
+                                    length + 1 + rule.extra,
+                                    index + rule.transform_id * count,
+                                    length,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Prefix "e ", "s ", ", ", and U+00A0: the word matches at
+        // data[2].
+        if data.len() >= 6
+            && ((data[1] == b' ' && matches!(data[0], b'e' | b's' | b','))
+                || (data[0] == 0xc2 && data[1] == 0xa0))
+        {
+            for &entry in &table.buckets[hash15(&data[2..6])] {
+                if entry.transform != TRANSFORM_IDENTITY {
+                    continue;
+                }
+                let length = usize::from(entry.length);
+                let index = usize::from(entry.index);
+                let count = 1_usize << dictionary::size_bits(length);
+                let word = dictionary::word(length, index).expect("dictionary word exists");
+                if !word_fits(word, data, 2) {
+                    continue;
+                }
+                if data[0] == 0xc2 {
+                    matches.add(length + 2, index + 102 * count, length);
+                } else if length + 2 < data.len() && data[length + 2] == b' ' {
+                    let transform_id = match data[0] {
+                        b'e' => 18,
+                        b's' => 7,
+                        _ => 13,
+                    };
+                    matches.add(length + 3, index + transform_id * count, length);
+                }
+            }
+        }
+
+        // Prefix " the " and ".com/": the word matches at data[5].
+        if data.len() >= 9
+            && ((data[0] == b' '
+                && data[1] == b't'
+                && data[2] == b'h'
+                && data[3] == b'e'
+                && data[4] == b' ')
+                || (data[0] == b'.'
+                    && data[1] == b'c'
+                    && data[2] == b'o'
+                    && data[3] == b'm'
+                    && data[4] == b'/'))
+        {
+            let is_the = data[0] == b' ';
+            for &entry in &table.buckets[hash15(&data[5..9])] {
+                if entry.transform != TRANSFORM_IDENTITY {
+                    continue;
+                }
+                let length = usize::from(entry.length);
+                let index = usize::from(entry.index);
+                let count = 1_usize << dictionary::size_bits(length);
+                let word = dictionary::word(length, index).expect("dictionary word exists");
+                if !word_fits(word, data, 5) {
+                    continue;
+                }
+                matches.add(
+                    length + 5,
+                    index + if is_the { 41 } else { 72 } * count,
+                    length,
+                );
+                if is_the && length + 5 < data.len() {
+                    let tail = &data[length + 5..];
+                    if tail.starts_with(b" of ") {
+                        matches.add(length + 9, index + 62 * count, length);
+                    }
+                    if tail.starts_with(b" of the ") {
+                        matches.add(length + 13, index + 73 * count, length);
+                    }
+                }
+            }
+        }
+
+        matches.collect(max_backward, max_distance)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DICTIONARY_HASH, DictionarySearch, build_dictionary_hash};
+    use super::{
+        DICTIONARY_HASH, DICTIONARY_LUT, DictionarySearch, LUT_ENTRY_COUNT, build_dictionary_hash,
+        build_lut,
+    };
 
     #[test]
     fn reference_hash_table_has_expected_shape() {
@@ -252,5 +885,94 @@ mod tests {
         let mut search = DictionarySearch::default();
         let found = search.find(input, 0, input.len(), 0, (1 << 22) - 16, 0);
         assert!(found.is_some());
+    }
+
+    #[test]
+    fn lut_entry_count_matches_reference() {
+        let table = DICTIONARY_LUT.get_or_init(build_lut);
+        assert_eq!(LUT_ENTRY_COUNT, 31704);
+        let total: usize = table.buckets.iter().map(Vec::len).sum();
+        assert_eq!(total, LUT_ENTRY_COUNT);
+    }
+
+    #[test]
+    fn find_all_matches_words_with_transforms() {
+        let max_backward = (1_usize << 22) - 16;
+        let max_distance = 0x3ff_fffc;
+        let mut search = DictionarySearch::default();
+
+        // "time" is a dictionary word; " and" after it is the suffix
+        // transform " and " (transform 10).
+        let input = b"time and more";
+        let found = search.find_all(input, 0, 4, input.len(), max_backward, max_distance);
+        assert!(found.iter().any(|m| m.length == 4 && m.length_code == 4));
+        assert!(found.iter().any(|m| m.length == 9 && m.length_code == 4));
+
+        // Every returned distance is a valid wire dictionary distance and
+        // every length code resolves back to a real word length.
+        for m in &found {
+            assert!(m.distance > max_backward);
+            assert!(m.distance <= max_distance);
+            assert!((4..=24).contains(&m.length_code));
+        }
+    }
+
+    #[test]
+    fn find_all_covers_uppercase_and_prefix_forms() {
+        let max_backward = (1_usize << 22) - 16;
+        let max_distance = 0x3ff_fffc;
+        let mut search = DictionarySearch::default();
+
+        // Uppercase-first: a lowercase-initial dictionary word matched in
+        // its capitalized form (transform 9); "Time and again" starts with
+        // such a form if "time" (or a capitalized variant) matches.
+        let input = b"People and more";
+        let found = search.find_all(input, 0, 4, input.len(), max_backward, max_distance);
+        // "people" is a dictionary word; the capitalized input must match
+        // either the uppercase-first transform or nothing.
+        assert!(
+            found.iter().any(|m| m.length == 6 && m.length_code == 6),
+            "expected the uppercase-first form of a dictionary word"
+        );
+
+        // Space prefix: " time" matches the " "-prefixed identity form
+        // (transform 6).
+        let input = b" time and more";
+        let found = search.find_all(input, 0, 4, input.len(), max_backward, max_distance);
+        assert!(found.iter().any(|m| m.length == 5 && m.length_code == 4));
+    }
+
+    #[test]
+    fn find_all_wire_distances_decode_to_input_bytes() {
+        // The decisive round-trip for a dictionary match: the decoder
+        // reconstructs the word through dictionary::transform(distance,
+        // length, max_backward) and the result must equal the input bytes the
+        // match covers. Any wrong transform id, word index, or distance
+        // formula produces different bytes here.
+        let max_backward = (1_usize << 22) - 16;
+        let max_distance = 0x3ff_fffc;
+        let mut search = DictionarySearch::default();
+
+        // Rich input: suffix transforms, uppercase forms, prefixes, the
+        // " the ... of the " chain, and plain words.
+        let corpus = b"the time and more of it, from the People with the first part. \
+This is a test of the est thing for the ing state. ";
+
+        let mut checked = 0;
+        for position in 0..corpus.len() {
+            let found = search.find_all(corpus, position, 4, corpus.len() - position, max_backward, max_distance);
+            for m in &found {
+                let decoded = crate::dictionary::transform(m.distance, m.length_code, max_backward)
+                    .expect("wire distance decodes through the RFC transform space");
+                let covered = &corpus[position..position + m.length];
+                assert_eq!(
+                    decoded, covered,
+                    "match at {position} (len {}, code {}) decodes to different bytes",
+                    m.length, m.length_code
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "expected a meaningful number of dictionary matches, got {checked}");
     }
 }

@@ -3,6 +3,7 @@ mod command;
 mod distance;
 mod fragment;
 mod greedy;
+mod hash_tree;
 mod match_finder;
 mod prefix_code;
 mod static_dictionary;
