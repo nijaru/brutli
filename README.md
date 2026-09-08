@@ -100,7 +100,7 @@ Its current baseline includes:
 - Stored-block fallback when compression is not beneficial.
 - Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
 
-Quality levels `0..=11` are accepted through `compress_with_quality`, but the current implementation only varies the match-search budget and does not yet match upstream quality-specific strategies. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Inputs above 16 MiB are compressed as a sequence of greedy metablocks, each choosing its compressed or stored form, with the match-finder window and recent-distance state carried across metablock boundaries.
+Quality levels `0..=11` are accepted through `compress_with_quality`. Qualities 0 and 1 use the upstream fast-fragment strategies (one-pass and two-pass respectively: independent window-sized fragments with fresh hash tables, a skip-32 match search, and per-metablock compressed-vs-stored choice). Higher qualities vary the match-search budget; the Zopfli optimal-parse strategies of qualities 10 and 11 are future work. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Inputs above 16 MiB are compressed as a sequence of greedy metablocks, each choosing its compressed or stored form, with the match-finder window and recent-distance state carried across metablock boundaries.
 
 ### Incremental encoding
 

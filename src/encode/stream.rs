@@ -1,29 +1,35 @@
 use super::bit_writer::BitWriter;
+use super::distance::RecentDistances;
+use super::fragment;
 use super::greedy::emit_chunk;
 use super::match_finder::MatchFinder;
 use super::{
     EncoderConfig, MAX_META_BLOCK_SIZE, compress_with_config, write_final_empty_metablock,
-    write_uncompressed_metablock, write_window_bits,
+    write_window_bits,
 };
 use crate::{EncodeProgress, EncodeStatus};
 /// Incremental greedy encoder core.
 ///
-/// Accumulates caller input in a bounded window and emits one greedy
-/// metablock each time `MAX_META_BLOCK_SIZE` unparsed bytes accumulate. The
-/// match finder's hash index and recent-distance ring persist across
-/// metablocks, so matches reference earlier output exactly as the decoder
-/// replays them. History beyond `max_backward_distance` bytes is compacted
-/// away, remapping the hash index; compaction only happens once the parse
-/// frontier has passed the window cap, so window-relative positions produce
-/// byte-identical output to the one-shot multi-metablock path.
+/// Accumulates caller input in a bounded window and emits one metablock each
+/// time `MAX_META_BLOCK_SIZE` unparsed bytes accumulate. The match finder's
+/// hash index and recent-distance ring persist across metablocks, so matches
+/// reference earlier output exactly as the decoder replays them. History
+/// beyond `max_backward_distance` bytes is compacted away, remapping the
+/// hash index; compaction only happens once the parse frontier has passed
+/// the window cap, so window-relative positions produce byte-identical
+/// output to the one-shot multi-metablock path.
 ///
-/// When `finish` arrives before any metablock has been emitted, the buffered
-/// input is encoded with the full one-shot candidate ladder, so small streams
-/// keep their exact one-shot form.
+/// Qualities 0 and 1 use the fragment paths instead: the emission unit is a
+/// fragment of `1 << window_bits` bytes (a fresh hash table per fragment;
+/// matches never cross fragment boundaries), the recent-distance ring
+/// threads across fragments, and the stream terminates with an empty last
+/// metablock exactly like the one-shot fragment output.
 #[derive(Debug)]
 pub(crate) struct StreamEncoder {
     config: EncoderConfig,
     finder: MatchFinder,
+    /// Recent-distance ring for the fragment paths (qualities 0 and 1).
+    fragment_ring: RecentDistances,
     writer: BitWriter,
     window: Vec<u8>,
     /// Window-relative frontier of emitted input; equals the parse frontier.
@@ -45,6 +51,7 @@ impl StreamEncoder {
         Self {
             config,
             finder,
+            fragment_ring: RecentDistances::default(),
             writer: BitWriter::default(),
             window: Vec::new(),
             flushed: 0,
@@ -53,9 +60,20 @@ impl StreamEncoder {
         }
     }
 
-    /// Consumes input, emitting one metablock per `MAX_META_BLOCK_SIZE` bytes,
-    /// and drains completed output bytes into `output`. All supplied input is
-    /// consumed in one call; output is the bounded resource.
+    /// The emission unit: the metablock cap for greedy qualities, the
+    /// fragment size (`1 << window_bits`) for the fragment qualities.
+    fn chunk_cap(&self) -> usize {
+        if self.config.quality() <= 1 {
+            1_usize << self.config.window_bits()
+        } else {
+            MAX_META_BLOCK_SIZE
+        }
+    }
+
+    /// Consumes input, emitting one chunk (metablock or fragment) each time
+    /// the cap is exceeded, and drains completed output bytes into `output`.
+    /// All supplied input is consumed in one call; output is the bounded
+    /// resource.
     ///
     /// Returns `consumed = 0, status = Done` when the stream has already been
     /// terminated: input supplied after completion is not consumed.
@@ -69,16 +87,16 @@ impl StreamEncoder {
 
         while !remaining.is_empty() {
             let pending = self.window.len() - self.flushed;
-            // Fill to one byte past the metablock cap before emitting. A
-            // stream that ends at or below the cap therefore reaches `finish`
-            // with no metablock emitted and keeps its exact one-shot form
-            // (including a single last metablock instead of a non-last one
-            // plus a terminating empty metablock).
-            let fill = (MAX_META_BLOCK_SIZE + 1 - pending).min(remaining.len());
+            // Fill to one byte past the chunk cap before emitting. A stream
+            // that ends at or below the cap therefore reaches `finish` with
+            // nothing emitted and keeps its exact one-shot form (including a
+            // single last metablock instead of a non-last one plus a
+            // terminating empty metablock).
+            let fill = (self.chunk_cap() + 1 - pending).min(remaining.len());
             self.window.extend_from_slice(&remaining[..fill]);
             remaining = &remaining[fill..];
 
-            if self.window.len() - self.flushed > MAX_META_BLOCK_SIZE {
+            if self.window.len() - self.flushed > self.chunk_cap() {
                 self.emit(false);
             }
         }
@@ -90,23 +108,33 @@ impl StreamEncoder {
         }
     }
 
-    /// Emits the remaining input as final metablocks, terminates the stream,
+    /// Emits the remaining input as final chunks, terminates the stream,
     /// and drains completed output bytes into `output`. Idempotent: further
     /// calls only drain.
     pub(crate) fn finish(&mut self, output: &mut [u8]) -> EncodeProgress {
         if !self.finished {
             if !self.started {
-                // No metablock filled, so the whole input is buffered below
-                // one metablock: delegate to the one-shot ladder so small
-                // streams keep their exact one-shot form.
+                // No chunk filled, so the whole input is buffered below one
+                // chunk: delegate to the one-shot ladder so small streams keep
+                // their exact one-shot form.
                 let stream = compress_with_config(&self.window, self.config);
                 self.writer.write_bytes(&stream);
                 self.window.clear();
                 self.flushed = 0;
+            } else if self.config.quality() <= 1 {
+                // Fragment paths: the final fragment is a non-last metablock
+                // sequence, terminated by the empty last metablock exactly
+                // like the one-shot fragment output.
+                if self.window.len() > self.flushed {
+                    self.emit(false);
+                }
+                write_final_empty_metablock(&mut self.writer);
+                self.writer.align_to_byte();
             } else {
                 let mut terminated = false;
                 while self.window.len() > self.flushed {
-                    let is_last = self.window.len() - self.flushed <= MAX_META_BLOCK_SIZE;
+                    let remaining = self.window.len() - self.flushed;
+                    let is_last = remaining <= self.chunk_cap();
                     self.emit(is_last);
                     terminated |= is_last;
                 }
@@ -123,10 +151,11 @@ impl StreamEncoder {
         self.drain(output)
     }
 
-    /// Emits the next metablock starting at the flush frontier. Quality 0
-    /// skips the greedy parse (mirroring the one-shot candidate ladder) and
-    /// emits a stored metablock; stored metablocks cannot be last, so a last
-    /// stored chunk is followed by the terminating empty metablock.
+    /// Emits the next chunk starting at the flush frontier. Greedy qualities
+    /// emit one metablock (compressed or stored) per chunk via the greedy
+    /// machinery; fragment qualities (0 and 1) emit one fragment of up to
+    /// `1 << window_bits` bytes via the fragment compressor (a sequence of
+    /// non-last metablocks, never a last metablock).
     fn emit(&mut self, is_last: bool) {
         debug_assert!(self.window.len() > self.flushed);
         if !self.started {
@@ -135,13 +164,14 @@ impl StreamEncoder {
         }
 
         let chunk_start = self.flushed;
-        let chunk_end = if self.config.quality() == 0 {
-            let chunk_end = (chunk_start + MAX_META_BLOCK_SIZE).min(self.window.len());
-            write_uncompressed_metablock(&mut self.writer, &self.window[chunk_start..chunk_end]);
-            if is_last {
-                write_final_empty_metablock(&mut self.writer);
-            }
-            self.finder.set_position(chunk_end);
+        let chunk_end = if self.config.quality() <= 1 {
+            let chunk_end = (chunk_start + self.chunk_cap()).min(self.window.len());
+            fragment::compress_fragment_range(
+                &self.window[chunk_start..chunk_end],
+                &mut self.writer,
+                self.config,
+                &mut self.fragment_ring,
+            );
             chunk_end
         } else {
             emit_chunk(
@@ -153,18 +183,25 @@ impl StreamEncoder {
                 is_last,
             )
         };
-        debug_assert_eq!(chunk_end, self.finder.position());
         self.flushed = chunk_end;
         self.compact();
     }
 
-    /// Drops history before the flush frontier that no future match can
-    /// reference, remapping the finder's positions so window-relative
-    /// distances stay correct. Compaction keeps exactly `max_backward_distance`
-    /// history bytes, which is provably sufficient: the finder clamps every
-    /// backward distance to `min(position, max_backward_distance)`, and
-    /// compaction only runs once the stream has passed the window cap.
+    /// Drops history that no future match can reference. Greedy qualities
+    /// keep exactly `max_backward_distance` history bytes, which is provably
+    /// sufficient: the finder clamps every backward distance to
+    /// `min(position, max_backward_distance)`, and compaction only runs
+    /// once the stream has passed the window cap. The fragment qualities
+    /// need no history at all — fragments are independent — so the window
+    /// drains to the flush frontier.
     fn compact(&mut self) {
+        if self.config.quality() <= 1 {
+            if self.flushed > 0 {
+                self.window.drain(..self.flushed);
+                self.flushed = 0;
+            }
+            return;
+        }
         let max_backward = self.config.max_backward_distance();
         if self.flushed > max_backward {
             let dropped = self.flushed - max_backward;
@@ -312,13 +349,66 @@ mod tests {
             },
         )
         .unwrap();
-        // Quality 0 one-shot output above the cap is all-stored, matching the
-        // streaming stored chunks plus terminating empty metablock.
+        // Streaming q0 fragments must match the one-shot fragment output
+        // (independent fragments, ring threaded across them).
         let config =
             EncoderConfig::new(DEFAULT_WINDOW_BITS, 0, crate::EncoderMode::Generic).unwrap();
         let streamed_q0 = encode_incrementally(&source, 1 << 20, config);
         assert_eq!(streamed_q0, one_shot);
         assert_eq!(decompress(&streamed_q0, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn quality_one_stream_matches_one_shot() {
+        let unit = b"the quick brown fox jumps over the lazy dog. ".repeat(96);
+        let mut source = unit.repeat((MAX_META_BLOCK_SIZE / unit.len()) + 2);
+        source.truncate(MAX_META_BLOCK_SIZE + 4096);
+
+        let one_shot = crate::encode::compress_with_options(
+            &source,
+            EncoderOptions {
+                quality: 1,
+                ..EncoderOptions::default()
+            },
+        )
+        .unwrap();
+        let config =
+            EncoderConfig::new(DEFAULT_WINDOW_BITS, 1, crate::EncoderMode::Generic).unwrap();
+        let streamed_q1 = encode_incrementally(&source, 1 << 20, config);
+        assert_eq!(streamed_q1, one_shot);
+        assert_eq!(decompress(&streamed_q1, source.len()).unwrap(), source);
+    }
+
+    #[test]
+    fn fragment_stream_multi_fragment_matches_one_shot() {
+        // WBITS 10 gives 1 KiB fragments: this stream spans many fragments,
+        // each compressed independently with the ring threaded across them.
+        let config = EncoderConfig::new(10, 1, crate::EncoderMode::Generic).unwrap();
+        let source = b"alpha beta gamma delta epsilon zeta eta theta. ".repeat(300);
+
+        let streamed = encode_incrementally(&source, 333, config);
+        assert_eq!(
+            streamed,
+            crate::encode::compress_with_options(
+                &source,
+                EncoderOptions {
+                    quality: 1,
+                    window_bits: 10,
+                    ..EncoderOptions::default()
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(decompress(&streamed, source.len()).unwrap(), source);
+
+        let mut decoded = vec![0_u8; source.len() + 1];
+        let info = brotli_decompressor::brotli_decode(&streamed, &mut decoded);
+        assert!(matches!(
+            info.result,
+            brotli_decompressor::BrotliResult::ResultSuccess
+        ));
+        assert_eq!(info.decoded_size, source.len());
+        assert_eq!(&decoded[..info.decoded_size], &source[..]);
     }
 
     #[test]

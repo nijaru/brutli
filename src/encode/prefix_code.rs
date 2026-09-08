@@ -127,6 +127,12 @@ impl PrefixEncoding {
     }
 }
 
+/// Lengths of the canonical Huffman code for the given frequencies;
+/// zero means the symbol is absent from the code.
+pub(super) fn code_lengths(frequencies: &[usize]) -> Vec<u8> {
+    huffman_code_lengths(frequencies)
+}
+
 fn huffman_code_lengths(frequencies: &[usize]) -> Vec<u8> {
     huffman_code_lengths_with_limit(frequencies, MAX_CODE_BITS)
 }

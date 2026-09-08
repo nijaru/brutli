@@ -1,6 +1,7 @@
 mod bit_writer;
 mod command;
 mod distance;
+mod fragment;
 mod greedy;
 mod match_finder;
 mod prefix_code;
@@ -90,8 +91,8 @@ impl EncoderConfig {
         }
     }
 }
-const LITERAL_ALPHABET_SIZE: u16 = 256;
-const COMMAND_ALPHABET_SIZE: u16 = 704;
+pub(super) const LITERAL_ALPHABET_SIZE: u16 = 256;
+pub(super) const COMMAND_ALPHABET_SIZE: u16 = 704;
 const BASE_DISTANCE_ALPHABET_SIZE: u16 = 64;
 const DIRECT_DISTANCE_CODES: u16 = 4;
 const DIRECT_DISTANCE_ALPHABET_SIZE: u16 = BASE_DISTANCE_ALPHABET_SIZE + DIRECT_DISTANCE_CODES;
@@ -123,6 +124,9 @@ pub(crate) fn encoder_config(options: EncoderOptions) -> Result<EncoderConfig, E
 pub(super) fn compress_with_config(input: &[u8], config: EncoderConfig) -> Vec<u8> {
     if input.is_empty() {
         return compress_stored(input, config);
+    }
+    if config.quality() <= 1 {
+        return fragment::compress(input, config);
     }
     if input.len() > MAX_META_BLOCK_SIZE {
         return try_compress_stream_or_fallback(input, config);

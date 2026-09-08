@@ -91,16 +91,6 @@ impl MatchFinder {
         self.apply_random_heuristics = self.apply_random_heuristics.saturating_sub(dropped);
     }
 
-    pub(super) fn position(&self) -> usize {
-        self.position
-    }
-
-    /// Advances the parse frontier without parsing, for quality levels whose
-    /// metablocks are emitted without the greedy path.
-    pub(super) fn set_position(&mut self, position: usize) {
-        self.position = position;
-    }
-
     /// Parses the chunk ending at `input.len()`, starting from the stream
     /// position carried over from the previous chunk. The pending literal run
     /// ending at the chunk boundary is reported via `tail_start`; the caller

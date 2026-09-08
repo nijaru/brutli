@@ -535,7 +535,7 @@ pub(super) fn try_compress_stream(input: &[u8], config: EncoderConfig) -> Option
 
 /// Bit cost of a stored metabock: ISLAST + MNIBBLES + MLEN + ISUNCOMPRESSED,
 /// zero-padded to a byte boundary, plus the raw data.
-fn stored_chunk_bits(length: usize) -> usize {
+pub(super) fn stored_chunk_bits(length: usize) -> usize {
     let header = 4 + 4 * usize::from(nibbles_for_length(length));
     let padding = (8 - header % 8) % 8;
     header + padding + 8 * length
@@ -698,7 +698,7 @@ fn prefix_codes(histograms: &[Vec<usize>], alphabet_size: u16) -> Option<Vec<Pre
         .collect()
 }
 
-fn seed_empty_histogram(frequencies: &mut [usize]) {
+pub(super) fn seed_empty_histogram(frequencies: &mut [usize]) {
     if frequencies.iter().all(|&frequency| frequency == 0) {
         frequencies[0] = 1;
     }
