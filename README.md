@@ -1,213 +1,121 @@
-# Brutli
+# brutli
 
-An idiomatic Brotli implementation.
+A from-scratch Brotli implementation in Rust, targeting RFC 7932.
 
-Brutli is a ground-up implementation of the Brotli format based on the specification rather than a translation of the reference C implementation.
+**Status:** the decoder is functional and the encoder supports qualities
+`0..=11` with compressed and stored streams. The encoder is still under
+compatibility and corpus validation. Brutli is not ready for production use,
+does not implement RFC 9841, and does not aim for API compatibility with
+`rust-brotli`.
 
-> **Status:** the RFC 7932 decoder is functional and the one-shot encoder now produces both compressed and stored streams. Brutli remains under compatibility, corpus, and performance validation and is not yet ready for production use.
+## Install
 
-## Current decoder
+The crate is not published. Depend on the Git repository (or a local path):
 
-- Incremental buffer-to-buffer decoding with explicit consumed/produced counts.
-- One-shot bounded decompression.
-- `std::io::Read` adapter over `BufRead` without swallowing bytes after the Brotli stream.
-- Configurable decoded-output and Brotli window limits.
-- Static dictionary support, including all RFC 7932 transforms.
-- Differential tests across reference encoder quality and window settings.
-- Large-stream tests that repeatedly wrap small Brotli history windows.
-- A deterministic bytewise reference model for bulk history-copy semantics.
-- Malformed/truncated-input tests and coverage-guided fuzzing.
-- Stable Rust 1.98 and Rust 2024 Edition.
-- No mandatory third-party dependencies.
+```toml
+[dependencies]
+brutli = { git = "https://github.com/nijaru/brutli" }
+```
 
-### One-shot decoding
+## Decoding
+
+The one-shot API requires a maximum decoded size and rejects trailing bytes
+after the Brotli stream:
 
 ```rust
-let compressed = /* Brotli bytes */;
+let compressed: &[u8] = /* Brotli bytes */;
 let decoded = brutli::decompress(compressed, 16 * 1024 * 1024)?;
 # Ok::<(), brutli::DecodeError>(())
 ```
 
-The second argument is the maximum allowed decoded size. Trailing bytes after the Brotli stream are rejected.
-
-### Incremental decoding
+For incremental decoding, `Decoder` exposes output/window limits and explicit
+`process` / `finish` calls:
 
 ```rust
 use brutli::{DecodeStatus, Decoder};
 
 let mut decoder = Decoder::with_limits(Some(16 * 1024 * 1024), 22);
-let mut input = /* Brotli bytes */;
 let mut output = [0_u8; 8192];
-
-loop {
-    let progress = decoder.process(input, &mut output)?;
-    input = &input[progress.consumed..];
-    // Consume output[..progress.produced].
-
-    match progress.status {
-        DecodeStatus::NeedInput => {
-            // Supply more input, or call decoder.finish(...) at EOF.
-            break;
-        }
-        DecodeStatus::NeedOutput => {}
-        DecodeStatus::Done => break,
-    }
-}
+let progress = decoder.process(compressed, &mut output)?;
+# let _ = (progress, DecodeStatus::NeedInput);
 # Ok::<(), brutli::DecodeError>(())
 ```
 
-RFC 7932 defines `WBITS` from 10 through 24. The window limit is checked immediately after the stream header, before history growth.
+`Decoder::with_output_limit` and `Decoder::with_max_window_bits` configure one
+limit at a time. The window limit is checked before history growth.
 
-### `std::io`
-
-`DecoderReader<R>` implements `Read` for `R: BufRead`:
+`DecoderReader<R>` implements `std::io::Read` for `R: BufRead`. It stops at the
+end of the first Brotli stream and preserves buffered trailing bytes:
 
 ```rust
 use std::io::{Cursor, Read};
 
-let source = Cursor::new(/* Brotli bytes */);
-let mut reader = brutli::DecoderReader::new(source);
+let mut reader = brutli::DecoderReader::new(Cursor::new(compressed));
 let mut decoded = Vec::new();
 reader.read_to_end(&mut decoded)?;
 # Ok::<(), std::io::Error>(())
 ```
 
-Using `BufRead` lets the adapter stop exactly at the end of the first Brotli stream while preserving already-buffered trailing bytes in the underlying reader.
+## Encoding
 
-## Current encoder
-
-The public encoder is currently a one-shot API. The default uses `WBITS=22`:
+The default one-shot encoder uses quality 5 and `WBITS=22`:
 
 ```rust
 let compressed = brutli::compress(b"Brotli data");
-let smaller_window = brutli::compress_with_window_bits(b"Brotli data", 16)?;
+let compressed = brutli::compress_with_quality(b"Brotli data", 9)?;
 # Ok::<(), brutli::EncodeError>(())
 ```
 
-`compress_with_window_bits` accepts the RFC 7932 range `10..=24` and returns
-`EncodeError` for invalid values.
-
-Its current baseline includes:
-
-- RFC 7932 stream and meta-block framing, including multi-metablock streams
-  for inputs larger than the 16 MiB single-metablock cap.
-- A bounded two-candidate-per-hash LZ77 matcher with compact `u32` positions.
-- One-step lazy matching for short copies using an approximate format-bit cost.
-- Frequency-weighted canonical Huffman generation with a valid 15-bit fallback.
-- Simple and complex prefix-tree serialization.
-- General backward-distance encoding plus Brotli recent-distance short codes.
-- Specialized short-period encoding for highly repetitive input.
-- Stored-block fallback when compression is not beneficial.
-- Round-trip fuzzing and interoperability tests against an independent Brotli decoder.
-
-Quality levels `0..=11` are accepted through `compress_with_quality`. Qualities 0 and 1 use the upstream fast-fragment strategies (one-pass and two-pass respectively: independent window-sized fragments with fresh hash tables, a skip-32 match search, and per-metablock compressed-vs-stored choice). Higher qualities vary the match-search budget; the Zopfli optimal-parse strategies of qualities 10 and 11 are future work. `EncoderMode::Font` selects the upstream font distance parameters (`NPOSTFIX=1`, `NDIRECT=12` at quality 4 and above); other modes currently behave like `Generic`. Inputs above 16 MiB are compressed as a sequence of greedy metablocks, each choosing its compressed or stored form, with the match-finder window and recent-distance state carried across metablock boundaries.
-
-### Incremental encoding
-
-`Encoder` mirrors the decoder's incremental API: it consumes uncompressed input through `process`, bounds output by the supplied slice, and terminates the stream with `finish`:
+`compress_with_options` accepts `EncoderOptions`:
 
 ```rust
-use brutli::{EncodeStatus, Encoder};
+use brutli::{EncoderMode, EncoderOptions, compress_with_options};
 
-let mut encoder = Encoder::new();
-let mut input = /* uncompressed bytes */;
-let mut output = Vec::new();
-let mut buffer = [0_u8; 8192];
-
-let mut consumed = 0_usize;
-while consumed < input.len() {
-    let progress = encoder.process(&input[consumed..], &mut buffer);
-    consumed += progress.consumed;
-    output.extend_from_slice(&buffer[..progress.produced]);
-}
-loop {
-    let progress = encoder.finish(&mut buffer);
-    output.extend_from_slice(&buffer[..progress.produced]);
-    if progress.status == EncodeStatus::Done {
-        break;
-    }
-}
-# let _ = output;
+let compressed = compress_with_options(
+    b"Brotli data",
+    EncoderOptions {
+        quality: 9,
+        window_bits: 22,
+        mode: EncoderMode::Generic,
+    },
+)?;
+# Ok::<(), brutli::EncodeError>(())
 ```
 
-`process` consumes all supplied input in one call; `NeedOutput` only means the
-output slice filled and more bytes are queued internally. `finish` is
-idempotent, and input supplied after `Done` is rejected without being
-consumed. Window history is compacted once it exceeds the configured window
-size, so memory stays bounded regardless of stream length. Output is
-byte-identical to the one-shot API for the same input and options.
+For streaming, `Encoder` provides `process` and `finish` with the same
+bounded-output model as `Decoder`. `EncoderOptions` validates quality and
+window bits (`10..=24`).
 
-## Goals
-
-- Correct RFC 7932 decoding and encoding.
-- Idiomatic stable Rust and Rust 2024 Edition.
-- A low-overhead buffer-to-buffer streaming decoder core independent of `std::io`.
-- Safe public APIs, with any future `unsafe` restricted to small, measured optimization kernels with documented invariants and portable fallbacks.
-- Minimal mandatory dependencies and allocation-conscious hot paths.
-- Differential and fuzz testing against mature Brotli implementations.
-- Performance competitive with `google/brotli` and `rust-brotli` without inheriting C-shaped architecture.
-- An architecture that can grow into the RFC 9841 Brotli extensions without redesigning the core.
+Quality levels `10` and `11` do not yet use Zopfli-style optimal parsing.
+`EncoderMode::Font` selects Brotli's font distance parameters; other modes
+currently share the generic encoder path.
 
 ## Validation
 
-The project currently includes:
-
-- reference-produced decoder compatibility fixtures,
-- a generated differential matrix covering reference qualities 0 through 11 and multiple window sizes,
-- multi-megabyte streams exercising repeated history-window wraparound,
-- a bytewise reference model for validating optimized ring/history operations,
-- deterministic malformed-input and truncation tests,
-- single-bit mutation tests,
-- external-decoder interoperability tests for Brutli encoder output,
-- separate decoder and encoder-round-trip `cargo-fuzz` targets with CI smoke runs and scheduled longer runs.
-
-Run the normal validation with:
-
-```text
+```sh
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+The test suite includes reference differential tests, malformed and truncated
+input cases, history-window wrap tests, and encoder interoperability checks. A
+C CLI round-trip test runs when the `brotli` executable is installed; CI
+installs it. Fuzz targets for decoding and encoder round trips are in `fuzz/`.
 
 ## Benchmarks
 
 Decoder and encoder benchmarks compare Brutli with `rust-brotli` by default:
 
-```text
+```sh
 cargo bench --bench decode
 cargo bench --bench encode
 ```
 
-The optional `current-google-reference` feature adds the pinned Google Brotli C implementation. It requires linking a local Google Brotli build; the benchmark workflow builds the pinned commit automatically. The decoder harness reports decoded-byte throughput across direct incremental, one-shot, and `Read` APIs. The encoder harness reports both compressed sizes and source-byte throughput at representative reference quality settings.
-
-Every benchmark fixture is validated for correctness before timing. GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. Broader corpus measurements and controlled local profiling remain the basis for performance and ratio decisions.
-
-On Linux with `perf` installed, the reproducible decoder profiling helper runs CPU-counter comparisons for all three decoder fixtures, then records a call graph for Brutli's binary path:
-
-```text
-bash scripts/profile-decode.sh
-```
-
-Set `GOOGLE_BROTLI_BUILD` to a Google Brotli build directory to include the pinned Google C comparator in the profile.
-
-It writes `perf-brutli-binary.data` and a text report at `perf-brutli-binary.txt`. `PERF_RUNS`, `SAMPLE_COUNT`, `SAMPLE_SIZE`, and `RECORD_SAMPLE_SIZE` can be overridden in the environment when a longer or shorter profile is desired.
-
-## Initial non-goals
-
-- API compatibility with `rust-brotli`.
-- Async-runtime-specific APIs. Async adapters can drive the same streaming decoder core externally.
-- `no_std` as an initial compatibility promise. The core should avoid unnecessary `std` coupling so this can be evaluated later.
-- SIMD before profiling demonstrates a useful target.
-- Premature encoder quality controls before the baseline is measured across representative corpora.
-
-## Plan
-
-1. Continue RFC 7932 compatibility and adversarial validation.
-2. Broaden encoder ratio/throughput benchmarks beyond synthetic fixtures.
-3. Optimize only measured decoder and encoder hot paths.
-4. Add encoder quality/ratio features where corpus results justify the complexity.
-5. Add RFC 9841 functionality after RFC 7932 compatibility is mature.
-
-See [DESIGN.md](DESIGN.md) for architecture and implementation constraints.
+Enable `current-google-reference` to add the pinned Google Brotli C
+implementation. That feature requires linking a local Google Brotli build; the
+benchmark workflow builds the pinned commit automatically. On Linux,
+`scripts/profile-decode.sh` profiles the decoder, with an optional Google
+comparator via `GOOGLE_BROTLI_BUILD`.
 
 ## License
 
