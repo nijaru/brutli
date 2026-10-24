@@ -23,9 +23,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Check out pinned Google Brotli
+        uses: actions/checkout@v6
+        with:
+          repository: google/brotli
+          ref: 2ff28fb62deeb8c49720acf2c16ecc8f6f7408f1
+          path: google-brotli
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build pinned Google Brotli
+        run: |
+          cmake -S google-brotli -B google-brotli/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBROTLI_DISABLE_TESTS=ON \
+            -DBROTLI_BUILD_TOOLS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build google-brotli/build --target brotlidec brotlicommon --parallel
       - name: Decoder benchmark
-        run: cargo bench --bench decode -- --sample-count 20 --sample-size 1
+        env:
+          RUSTFLAGS: >-
+            -L native=${{ github.workspace }}/google-brotli/build
+            -l static=brotlidec
+            -l static=brotlicommon
+            -l m
+        run: cargo bench --features current-google-reference --bench decode -- --sample-count 20 --sample-size 1
 
   encode:
     runs-on: ubuntu-latest

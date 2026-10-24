@@ -73,14 +73,7 @@ impl Case {
             "rust-brotli direct-slice fixture failed validation"
         );
 
-        let mut decoded = vec![0_u8; source.len() + 1];
-        let decoded_size = google_brotli_decode_into(&compressed, &mut decoded);
-        assert_eq!(decoded_size, source.len());
-        assert_eq!(
-            &decoded[..decoded_size],
-            source,
-            "Google Brotli direct-slice fixture failed validation"
-        );
+        validate_google(&compressed, &source);
 
         Self { source, compressed }
     }
@@ -231,12 +224,38 @@ fn bench_rust_brotli_reader(bencher: divan::Bencher<'_, '_>, case: &'static Case
         });
 }
 
+#[cfg(feature = "current-google-reference")]
+fn validate_google(compressed: &[u8], source: &[u8]) {
+    let mut decoded = vec![0_u8; source.len() + 1];
+    let decoded_size = google_brotli_decode_into(compressed, &mut decoded);
+    assert_eq!(decoded_size, source.len());
+    assert_eq!(
+        &decoded[..decoded_size],
+        source,
+        "Google Brotli direct-slice fixture failed validation"
+    );
+}
+
+#[cfg(not(feature = "current-google-reference"))]
+fn validate_google(_: &[u8], _: &[u8]) {}
+
+#[cfg(feature = "current-google-reference")]
+unsafe extern "C" {
+    fn BrotliDecoderDecompress(
+        encoded_size: usize,
+        encoded_buffer: *const u8,
+        decoded_size: *mut usize,
+        decoded_buffer: *mut u8,
+    ) -> i32;
+}
+
+#[cfg(feature = "current-google-reference")]
 fn google_brotli_decode_into(input: &[u8], output: &mut [u8]) -> usize {
     let mut decoded_size = output.len();
     let result = unsafe {
         // SAFETY: The input and output pointers are valid for their respective lengths,
         // and the decoder writes at most the capacity supplied through `decoded_size`.
-        brotli_sys::BrotliDecoderDecompress(
+        BrotliDecoderDecompress(
             input.len(),
             input.as_ptr(),
             &mut decoded_size,
@@ -250,6 +269,7 @@ fn google_brotli_decode_into(input: &[u8], output: &mut [u8]) -> usize {
     decoded_size
 }
 
+#[cfg(feature = "current-google-reference")]
 fn bench_google_brotli_direct(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     let mut output = vec![0_u8; case.source.len() + 1];
     bencher
@@ -309,6 +329,7 @@ macro_rules! decode_benches {
                 bench_rust_brotli_reader(bencher, &$case);
             }
 
+            #[cfg(feature = "current-google-reference")]
             #[divan::bench]
             fn google_brotli_direct(bencher: divan::Bencher<'_, '_>) {
                 bench_google_brotli_direct(bencher, &$case);

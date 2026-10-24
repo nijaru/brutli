@@ -170,22 +170,24 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Benchmarks
 
-Decoder and encoder benchmarks compare Brutli with the official Google Brotli C implementation and `rust-brotli`:
+Decoder and encoder benchmarks compare Brutli with `rust-brotli` by default:
 
 ```text
 cargo bench --bench decode
 cargo bench --bench encode
 ```
 
-The decoder harness reports decoded-byte throughput across direct incremental, one-shot, and `Read` APIs. The encoder harness reports both compressed sizes and source-byte throughput for Brutli, Google Brotli, and `rust-brotli` at representative reference quality settings.
+The optional `current-google-reference` feature adds the pinned Google Brotli C implementation. It requires linking a local Google Brotli build; the benchmark workflow builds the pinned commit automatically. The decoder harness reports decoded-byte throughput across direct incremental, one-shot, and `Read` APIs. The encoder harness reports both compressed sizes and source-byte throughput at representative reference quality settings.
 
 Every benchmark fixture is validated for correctness before timing. GitHub-hosted runner results are useful for finding large regressions and obvious hot paths, but they are not treated as publishable performance claims. Broader corpus measurements and controlled local profiling remain the basis for performance and ratio decisions.
 
-On Linux with `perf` installed, the reproducible decoder profiling helper runs CPU-counter comparisons for all three decoder fixtures plus the direct Google/rust-brotli binary comparators, then records a call graph for Brutli's binary path:
+On Linux with `perf` installed, the reproducible decoder profiling helper runs CPU-counter comparisons for all three decoder fixtures, then records a call graph for Brutli's binary path:
 
 ```text
 bash scripts/profile-decode.sh
 ```
+
+Set `GOOGLE_BROTLI_BUILD` to a Google Brotli build directory to include the pinned Google C comparator in the profile.
 
 It writes `perf-brutli-binary.data` and a text report at `perf-brutli-binary.txt`. `PERF_RUNS`, `SAMPLE_COUNT`, `SAMPLE_SIZE`, and `RECORD_SAMPLE_SIZE` can be overridden in the environment when a longer or shorter profile is desired.
 

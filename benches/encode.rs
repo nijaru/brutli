@@ -7,7 +7,7 @@ use divan::counter::BytesCount;
 #[cfg(feature = "current-google-reference")]
 const GOOGLE_REFERENCE: &str = "google/brotli@2ff28fb62deeb8c49720acf2c16ecc8f6f7408f1";
 #[cfg(not(feature = "current-google-reference"))]
-const GOOGLE_REFERENCE: &str = "brotli-sys 0.3.2 (legacy bundled C reference)";
+const GOOGLE_REFERENCE: &str = "not linked (enable current-google-reference)";
 
 struct Case {
     source: Vec<u8>,
@@ -21,10 +21,8 @@ impl Case {
         for quality in [1, 5] {
             let rust = rust_brotli_compress(&source, quality);
             validate(&source, &rust, "rust-brotli");
-
-            let google = google_brotli_compress(&source, quality);
-            validate(&source, &google, "Google Brotli");
         }
+        validate_google(&source);
 
         Self { source }
     }
@@ -157,17 +155,29 @@ fn print_ratio(name: &str, case: &Case) {
     let brutli = brutli::compress(&case.source);
     let rust_q1 = rust_brotli_compress(&case.source, 1);
     let rust_q5 = rust_brotli_compress(&case.source, 5);
-    let google_q1 = google_brotli_compress(&case.source, 1);
-    let google_q5 = google_brotli_compress(&case.source, 5);
 
+    #[cfg(feature = "current-google-reference")]
+    {
+        let google_q1 = google_brotli_compress(&case.source, 1);
+        let google_q5 = google_brotli_compress(&case.source, 5);
+        println!(
+            "ratio {name}: source={} brutli={} rust_q1={} rust_q5={} google_q1={} google_q5={}",
+            case.source.len(),
+            brutli.len(),
+            rust_q1.len(),
+            rust_q5.len(),
+            google_q1.len(),
+            google_q5.len(),
+        );
+    }
+
+    #[cfg(not(feature = "current-google-reference"))]
     println!(
-        "ratio {name}: source={} brutli={} rust_q1={} rust_q5={} google_q1={} google_q5={}",
+        "ratio {name}: source={} brutli={} rust_q1={} rust_q5={}",
         case.source.len(),
         brutli.len(),
         rust_q1.len(),
         rust_q5.len(),
-        google_q1.len(),
-        google_q5.len(),
     );
 }
 
@@ -178,33 +188,16 @@ fn rust_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
     compressed
 }
 
-#[cfg(not(feature = "current-google-reference"))]
-fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
-    let quality = i32::try_from(quality).expect("Brotli quality fits c_int");
-    let capacity = unsafe {
-        // SAFETY: The function only computes an upper bound from the supplied size.
-        brotli_sys::BrotliEncoderMaxCompressedSize(source.len())
-    };
-    let mut compressed = vec![0_u8; capacity];
-    let mut compressed_size = capacity;
-    let result = unsafe {
-        // SAFETY: The input pointer is valid for `source.len()` bytes. The output
-        // pointer is valid for `capacity` bytes and `compressed_size` supplies
-        // that capacity to the encoder.
-        brotli_sys::BrotliEncoderCompress(
-            quality,
-            22,
-            brotli_sys::BROTLI_MODE_GENERIC,
-            source.len(),
-            source.as_ptr(),
-            &mut compressed_size,
-            compressed.as_mut_ptr(),
-        )
-    };
-    assert_ne!(result, 0, "Google Brotli encoder failed");
-    compressed.truncate(compressed_size);
-    compressed
+#[cfg(feature = "current-google-reference")]
+fn validate_google(source: &[u8]) {
+    for quality in [1, 5] {
+        let google = google_brotli_compress(source, quality);
+        validate(source, &google, "Google Brotli");
+    }
 }
+
+#[cfg(not(feature = "current-google-reference"))]
+fn validate_google(_: &[u8]) {}
 
 #[cfg(feature = "current-google-reference")]
 fn google_brotli_compress(source: &[u8], quality: u32) -> Vec<u8> {
@@ -266,6 +259,7 @@ fn bench_rust_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quali
         .bench(|| rust_brotli_compress(divan::black_box(case.source.as_slice()), quality));
 }
 
+#[cfg(feature = "current-google-reference")]
 fn bench_google_brotli(bencher: divan::Bencher<'_, '_>, case: &'static Case, quality: u32) {
     bencher
         .counter(BytesCount::new(case.source.len()))
@@ -292,11 +286,13 @@ macro_rules! encode_benches {
                 bench_rust_brotli(bencher, &$case, 5);
             }
 
+            #[cfg(feature = "current-google-reference")]
             #[divan::bench]
             fn google_brotli_q1(bencher: divan::Bencher<'_, '_>) {
                 bench_google_brotli(bencher, &$case, 1);
             }
 
+            #[cfg(feature = "current-google-reference")]
             #[divan::bench]
             fn google_brotli_q5(bencher: divan::Bencher<'_, '_>) {
                 bench_google_brotli(bencher, &$case, 5);

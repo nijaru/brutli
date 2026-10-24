@@ -36,7 +36,16 @@ else
   echo "profiling without CPU pinning"
 fi
 
-cargo bench --bench decode --no-run
+GOOGLE_BROTLI_BUILD="${GOOGLE_BROTLI_BUILD:-}"
+bench_args=(--bench decode)
+if [[ -n "${GOOGLE_BROTLI_BUILD}" ]]; then
+  bench_args=(--features current-google-reference "${bench_args[@]}")
+  RUSTFLAGS="${RUSTFLAGS:-} -L native=${GOOGLE_BROTLI_BUILD} -l static=brotlidec -l static=brotlicommon -l m" \
+    cargo bench "${bench_args[@]}" --no-run
+else
+  echo "GOOGLE_BROTLI_BUILD is not set; skipping the Google Brotli comparator"
+  cargo bench "${bench_args[@]}" --no-run
+fi
 
 bench_binary="$({
   find target/release/deps -maxdepth 1 -type f -executable -name 'decode-*' -print0 \
@@ -94,7 +103,9 @@ record_case() {
 
 for case_name in binary repetitive text; do
   run_stat "${case_name}::brutli_direct$"
-  run_stat "${case_name}::google_brotli_direct$"
+  if [[ -n "${GOOGLE_BROTLI_BUILD}" ]]; then
+    run_stat "${case_name}::google_brotli_direct$"
+  fi
   run_stat "${case_name}::rust_brotli_direct$"
 done
 

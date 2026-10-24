@@ -3,7 +3,10 @@ use std::sync::LazyLock;
 
 use divan::counter::BytesCount;
 
+#[cfg(feature = "current-google-reference")]
 const GOOGLE_REFERENCE: &str = "google/brotli@2ff28fb62deeb8c49720acf2c16ecc8f6f7408f1";
+#[cfg(not(feature = "current-google-reference"))]
+const GOOGLE_REFERENCE: &str = "not linked (enable current-google-reference)";
 const GOOGLE_TESTDATA: &str = "google-brotli/tests/testdata";
 
 struct Case {
@@ -27,8 +30,7 @@ impl Case {
     fn new(source: Vec<u8>) -> Self {
         let brutli = brutli::compress(&source);
         validate(&source, &brutli, "Brutli");
-        let google = google_brotli_compress(&source);
-        validate(&source, &google, "Google Brotli");
+        validate_google(&source);
         Self { source }
     }
 }
@@ -57,15 +59,36 @@ fn validate(source: &[u8], compressed: &[u8], encoder: &str) {
 
 fn print_ratio(name: &str, case: &Case) {
     let brutli = brutli::compress(&case.source);
-    let google = google_brotli_compress(&case.source);
+
+    #[cfg(feature = "current-google-reference")]
+    {
+        let google = google_brotli_compress(&case.source);
+        println!(
+            "corpus {name}: source={} brutli={} google_q5={}",
+            case.source.len(),
+            brutli.len(),
+            google.len(),
+        );
+    }
+
+    #[cfg(not(feature = "current-google-reference"))]
     println!(
-        "corpus {name}: source={} brutli={} google_q5={}",
+        "corpus {name}: source={} brutli={}",
         case.source.len(),
         brutli.len(),
-        google.len(),
     );
 }
 
+#[cfg(feature = "current-google-reference")]
+fn validate_google(source: &[u8]) {
+    let google = google_brotli_compress(source);
+    validate(source, &google, "Google Brotli");
+}
+
+#[cfg(not(feature = "current-google-reference"))]
+fn validate_google(_: &[u8]) {}
+
+#[cfg(feature = "current-google-reference")]
 fn google_brotli_compress(source: &[u8]) -> Vec<u8> {
     let capacity = unsafe {
         // SAFETY: The function only computes an upper bound from the supplied size.
@@ -92,6 +115,7 @@ fn google_brotli_compress(source: &[u8]) -> Vec<u8> {
     compressed
 }
 
+#[cfg(feature = "current-google-reference")]
 unsafe extern "C" {
     fn BrotliEncoderMaxCompressedSize(input_size: usize) -> usize;
     fn BrotliEncoderCompress(
@@ -111,6 +135,7 @@ fn bench_brutli(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
         .bench(|| brutli::compress(divan::black_box(case.source.as_slice())));
 }
 
+#[cfg(feature = "current-google-reference")]
 fn bench_google(bencher: divan::Bencher<'_, '_>, case: &'static Case) {
     bencher
         .counter(BytesCount::new(case.source.len()))
@@ -127,6 +152,7 @@ macro_rules! corpus_benches {
                 bench_brutli(bencher, &$case);
             }
 
+            #[cfg(feature = "current-google-reference")]
             #[divan::bench]
             fn google_brotli_q5(bencher: divan::Bencher<'_, '_>) {
                 bench_google(bencher, &$case);
