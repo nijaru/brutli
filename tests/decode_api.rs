@@ -100,6 +100,21 @@ fn exact_output_limit_distinguishes_done_from_overflow() {
 }
 
 #[test]
+fn zero_output_limit_accepts_empty_stream() {
+    let compressed = compress(b"");
+    assert_eq!(decompress(&compressed, 0), Ok(Vec::new()));
+}
+
+#[test]
+fn zero_output_limit_rejects_nonempty_stream() {
+    let compressed = compress(b"x");
+    assert_eq!(
+        decompress(&compressed, 0),
+        Err(DecodeError::OutputLimitExceeded { limit: 0 })
+    );
+}
+
+#[test]
 fn finish_reports_truncated_input() {
     let mut decoder = Decoder::new();
     let mut output = [0_u8; 256];
