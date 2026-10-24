@@ -1,4 +1,4 @@
-use brutli::{DecodeError, DecodeStatus, Decoder, decompress};
+use brutli::{DecodeError, DecodeStatus, Decoder, compress, decompress};
 
 const COMPRESSED: &[u8] = &[
     0xe2, 0x0e, 0x00, 0x80, 0xc0, 0x0e, 0xd8, 0xdc, 0x65, 0x2e, 0x44, 0x6c, 0x71, 0x60, 0xdd, 0x31,
@@ -57,6 +57,46 @@ fn one_shot_decode_is_strict_and_bounded() {
         decompress(&with_trailing, expected().len()),
         Err(DecodeError::TrailingData { remaining: 1 })
     );
+}
+
+#[test]
+fn exact_output_limit_distinguishes_done_from_overflow() {
+    let source: Vec<u8> = (0..8192).map(|index| (index % 251) as u8).collect();
+    let compressed = compress(&source);
+
+    assert_eq!(decompress(&compressed, source.len()).unwrap(), source);
+    assert_eq!(
+        decompress(&compressed, source.len() - 1),
+        Err(DecodeError::OutputLimitExceeded {
+            limit: source.len() - 1,
+        })
+    );
+
+    let mut decoder = Decoder::with_output_limit(source.len());
+    let mut output = vec![0_u8; source.len()];
+    let mut input_offset = 0;
+    let mut produced = 0;
+
+    loop {
+        let progress = if input_offset < compressed.len() {
+            decoder
+                .process(&compressed[input_offset..], &mut output[produced..])
+                .unwrap()
+        } else {
+            decoder.finish(&mut output[produced..]).unwrap()
+        };
+        input_offset += progress.consumed;
+        produced += progress.produced;
+
+        match progress.status {
+            DecodeStatus::Done => break,
+            DecodeStatus::NeedOutput => assert!(produced < output.len()),
+            DecodeStatus::NeedInput => assert_eq!(input_offset, compressed.len()),
+        }
+    }
+
+    assert_eq!(produced, source.len());
+    assert_eq!(output, source);
 }
 
 #[test]

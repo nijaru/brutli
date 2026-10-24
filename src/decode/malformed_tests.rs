@@ -80,6 +80,7 @@ fn rejects_invalid_single_type_block_switch_without_panicking() {
         let mut decoder = Decoder::new();
         let mut offset = 0;
         let mut output = [0; 8192];
+        let mut produced = 0;
         let mut error = None;
 
         for _ in 0..1_000_000 {
@@ -93,6 +94,11 @@ fn rejects_invalid_single_type_block_switch_without_panicking() {
             match progress {
                 Ok(progress) => {
                     offset += progress.consumed;
+                    produced += progress.produced;
+                    assert!(
+                        produced <= 32 * 1024 * 1024,
+                        "invalid stream produced {produced} bytes before failing"
+                    );
                     if progress.status == DecodeStatus::Done {
                         break;
                     }
@@ -130,6 +136,7 @@ fn output_limit_bounds_invalid_single_type_block_switch_work() {
             Ok(progress) => {
                 offset += progress.consumed;
                 assert!(offset <= INVALID_BLOCK_SWITCH_STREAM.len());
+                assert!(decoder.total_output() <= limit);
                 assert!(
                     progress.consumed != 0 || progress.produced != 0,
                     "decoder stalled"
@@ -140,6 +147,11 @@ fn output_limit_bounds_invalid_single_type_block_switch_work() {
             }
             Err(DecodeError::OutputLimitExceeded { limit: actual }) => {
                 assert_eq!(actual, limit);
+                assert!(decoder.total_output() <= limit);
+                return;
+            }
+            Err(DecodeError::InvalidCompressedData) => {
+                assert!(decoder.total_output() <= limit);
                 return;
             }
             Err(err) => panic!("unexpected error: {err:?}"),
