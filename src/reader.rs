@@ -6,7 +6,9 @@ use crate::{DecodeError, DecodeStatus, Decoder};
 ///
 /// `DecoderReader` consumes only bytes belonging to the first Brotli stream.
 /// Any bytes already buffered after the stream remain available from the
-/// underlying [`BufRead`] value returned by [`Self::into_inner`].
+/// underlying [`BufRead`] value returned by [`Self::into_inner`]. Decode errors
+/// are terminal: subsequent non-empty reads return the same decode error
+/// without accessing the underlying reader. Source I/O errors may be retried.
 #[derive(Debug)]
 pub struct DecoderReader<R> {
     inner: R,
@@ -61,6 +63,9 @@ impl<R: BufRead> Read for DecoderReader<R> {
         if output.is_empty() || self.done {
             return Ok(0);
         }
+        if let Some(error) = self.decoder.error {
+            return Err(decode_error_to_io(error));
+        }
 
         loop {
             let input = self.inner.fill_buf()?;
@@ -86,12 +91,6 @@ impl<R: BufRead> Read for DecoderReader<R> {
 
             match progress.status {
                 DecodeStatus::Done => return Ok(0),
-                DecodeStatus::NeedInput if end_of_input => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        DecodeError::UnexpectedEof,
-                    ));
-                }
                 DecodeStatus::NeedInput => {
                     if progress.consumed == 0 {
                         return Err(io::Error::other(

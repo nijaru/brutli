@@ -124,7 +124,6 @@ impl CoreDecoder {
             .map_err(|_| CoreError::InvalidStreamHeader)?
             .expect("a Brotli stream header fits within one input byte");
         let window_bits = header.window_bits();
-        self.window_checked = true;
 
         if window_bits > self.max_window_bits {
             return Err(CoreError::WindowLimitExceeded {
@@ -133,6 +132,7 @@ impl CoreDecoder {
             });
         }
 
+        self.window_checked = true;
         Ok(())
     }
 }
@@ -142,32 +142,44 @@ pub(crate) fn fuzz_decode(input: &[u8]) {
     const MAX_OUTPUT: usize = 1 << 20;
     const MAX_STEPS: usize = 4096;
 
-    let mut decoder = CoreDecoder::default();
+    let mut decoder = crate::Decoder::with_output_limit(MAX_OUTPUT);
     let mut input_offset = 0;
-    let mut total_output = 0;
+    let mut finishing = false;
 
     for _ in 0..MAX_STEPS {
         let mut output = [0_u8; 4096];
-        let result = match decoder.process(&input[input_offset..], &mut output) {
+        let result = if finishing {
+            decoder.finish(&mut output)
+        } else {
+            decoder.process(&input[input_offset..], &mut output)
+        };
+        let result = match result {
             Ok(result) => result,
-            Err(_) => return,
+            Err(error) => {
+                let total_output = decoder.total_output();
+                output.fill(0xa5);
+                assert_eq!(
+                    decoder.process(&input[input_offset..], &mut output),
+                    Err(error)
+                );
+                assert_eq!(decoder.finish(&mut output), Err(error));
+                assert_eq!(output, [0xa5; 4096]);
+                assert_eq!(decoder.total_output(), total_output);
+                return;
+            }
         };
 
         input_offset += result.consumed;
-        total_output += result.produced;
         assert!(input_offset <= input.len());
-
-        if total_output >= MAX_OUTPUT {
-            return;
-        }
+        assert!(decoder.total_output() <= MAX_OUTPUT);
 
         match result.status {
-            CoreStatus::Done => return,
-            CoreStatus::NeedInput => {
+            crate::DecodeStatus::Done => return,
+            crate::DecodeStatus::NeedInput => {
                 assert_eq!(input_offset, input.len());
-                return;
+                finishing = true;
             }
-            CoreStatus::NeedOutput => {
+            crate::DecodeStatus::NeedOutput => {
                 assert!(
                     result.consumed != 0 || result.produced != 0,
                     "decoder stalled while requesting output"

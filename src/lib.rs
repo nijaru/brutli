@@ -104,12 +104,15 @@ impl std::error::Error for DecodeError {}
 /// Incremental RFC 7932 Brotli decoder.
 ///
 /// `Decoder` retains only decoding state between calls. It never stores
-/// references to caller-provided input or output buffers.
+/// references to caller-provided input or output buffers. Decode errors are
+/// terminal: subsequent calls to [`Self::process`] or [`Self::finish`] return
+/// the same error without consuming input or modifying output.
 #[derive(Debug, Default)]
 pub struct Decoder {
     core: decode::CoreDecoder,
     output_limit: Option<usize>,
     total_output: usize,
+    error: Option<DecodeError>,
 }
 
 impl Decoder {
@@ -145,6 +148,7 @@ impl Decoder {
             core: decode::CoreDecoder::with_max_window_bits(max_window_bits),
             output_limit: max_output_size,
             total_output: 0,
+            error: None,
         }
     }
 
@@ -159,6 +163,7 @@ impl Decoder {
     /// A `NeedInput` result means the supplied input slice was exhausted. A
     /// `NeedOutput` result means the output slice was exhausted. Advance the
     /// corresponding slice by `consumed` or `produced` before calling again.
+    /// Discard any output from a failing call; no progress is returned on error.
     pub fn process(
         &mut self,
         input: &[u8],
@@ -178,6 +183,23 @@ impl Decoder {
     }
 
     fn process_inner(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        end_of_input: bool,
+    ) -> Result<DecodeProgress, DecodeError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+
+        let result = self.advance(input, output, end_of_input);
+        if let Err(error) = result {
+            self.error = Some(error);
+        }
+        result
+    }
+
+    fn advance(
         &mut self,
         input: &[u8],
         output: &mut [u8],

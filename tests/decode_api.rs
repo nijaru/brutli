@@ -124,18 +124,74 @@ fn finish_reports_truncated_input() {
     assert_eq!(progress.status, DecodeStatus::NeedInput);
 
     assert_eq!(decoder.finish(&mut output), Err(DecodeError::UnexpectedEof));
+    assert_terminal_error(&mut decoder, COMPRESSED, DecodeError::UnexpectedEof);
 }
 
 #[test]
-fn window_limit_rejects_stream_before_history_growth() {
+fn window_limit_rejection_is_terminal() {
     let mut decoder = Decoder::with_max_window_bits(20);
-    let mut output = [];
+    // A complete empty stream with WBITS=24 must stay rejected on retry.
+    let input = [0x3f];
+    let error = DecodeError::WindowLimitExceeded {
+        window_bits: 24,
+        max_window_bits: 20,
+    };
 
-    assert_eq!(
-        decoder.process(&[0b0001111], &mut output),
-        Err(DecodeError::WindowLimitExceeded {
-            window_bits: 24,
-            max_window_bits: 20,
-        })
-    );
+    assert_eq!(decoder.process(&input, &mut []), Err(error));
+    assert_terminal_error(&mut decoder, &input, error);
+}
+
+#[test]
+fn format_and_output_limit_errors_are_terminal() {
+    // Both compressed streams declare MLEN=1 and use single-symbol trees.
+    // Command 16 inserts two bytes; command 130 copies a four-byte dictionary
+    // word. Each exceeds the metablock length after decoding its extra bits.
+    let insert_overflow = [0x02, 0x00, 0x00, 0x00, 0x44, 0x50, 0x40, 0x10, 0x00];
+    let copy_overflow = [0x02, 0x00, 0x00, 0x00, 0x44, 0x50, 0x08, 0x12, 0x00];
+    // The matching valid command-8 stream emits one 'A'; its unused final
+    // alignment bit is set here. The Google C decoder also rejects it.
+    let nonzero_padding = [0x02, 0x00, 0x00, 0x00, 0x44, 0x50, 0x20, 0x10, 0x80];
+    let cases: [(Decoder, &[u8], DecodeError); 6] = [
+        (
+            Decoder::new(),
+            &insert_overflow,
+            DecodeError::InvalidCompressedData,
+        ),
+        (
+            Decoder::new(),
+            &copy_overflow,
+            DecodeError::InvalidCompressedData,
+        ),
+        (Decoder::new(), &[0x11], DecodeError::InvalidStreamHeader),
+        // Non-zero padding in an empty metablock is a header error.
+        (Decoder::new(), &[0x86], DecodeError::InvalidMetaBlock),
+        (
+            Decoder::new(),
+            &nonzero_padding,
+            DecodeError::NonZeroPadding,
+        ),
+        (
+            Decoder::with_output_limit(0),
+            COMPRESSED,
+            DecodeError::OutputLimitExceeded { limit: 0 },
+        ),
+    ];
+
+    for (mut decoder, input, error) in cases {
+        assert_eq!(decoder.process(input, &mut [0; 128]), Err(error));
+        assert_terminal_error(&mut decoder, input, error);
+    }
+}
+
+fn assert_terminal_error(decoder: &mut Decoder, input: &[u8], error: DecodeError) {
+    let total_output = decoder.total_output();
+    let mut output = [0xa5; 128];
+    for retry_input in [input, COMPRESSED, &[]] {
+        assert_eq!(decoder.process(retry_input, &mut output), Err(error));
+        assert_eq!(output, [0xa5; 128]);
+        assert_eq!(decoder.total_output(), total_output);
+    }
+    assert_eq!(decoder.finish(&mut output), Err(error));
+    assert_eq!(output, [0xa5; 128]);
+    assert_eq!(decoder.total_output(), total_output);
 }
