@@ -255,7 +255,7 @@ pub enum EncoderMode {
     Font,
 }
 
-/// Options controlling one-shot Brotli encoding.
+/// Options controlling one-shot and incremental Brotli encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderOptions {
     /// Quality level from `0` (fastest) through `11` (slowest).
@@ -404,8 +404,7 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 /// Encodes one complete Brotli stream with explicit encoder options.
 ///
 /// Quality values `0..=11` and RFC 7932 window values `10..=24` are accepted.
-/// The current implementation remains a partial upstream-compatible encoder;
-/// streaming controls are not part of [`EncoderOptions`] yet.
+/// For incremental encoding with these options, use [`Encoder::with_options`].
 pub fn compress_with_options(
     input: &[u8],
     options: EncoderOptions,
@@ -416,8 +415,8 @@ pub fn compress_with_options(
 /// Encodes one complete RFC 7932 Brotli stream with a selected window size.
 ///
 /// `window_bits` must be in the RFC 7932 range `10..=24`. The window size is
-/// `(1 << window_bits) - 16` bytes. This remains a one-shot encoder;
-/// streaming controls are not exposed yet.
+/// `(1 << window_bits) - 16` bytes. For incremental encoding, set
+/// [`EncoderOptions::window_bits`] and use [`Encoder::with_options`].
 pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8>, EncodeError> {
     compress_with_options(
         input,
@@ -432,8 +431,8 @@ pub fn compress_with_window_bits(input: &[u8], window_bits: u8) -> Result<Vec<u8
 /// default `WBITS=22` window.
 ///
 /// Quality values from `0` through `11` are accepted. Higher values spend more
-/// work searching for matches. This one-shot encoder is still a partial
-/// upstream-compatible implementation; streaming controls are not exposed yet.
+/// work searching for matches. For incremental encoding, set
+/// [`EncoderOptions::quality`] and use [`Encoder::with_options`].
 pub fn compress_with_quality(input: &[u8], quality: u8) -> Result<Vec<u8>, EncodeError> {
     compress_with_options(
         input,

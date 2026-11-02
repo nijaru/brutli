@@ -23,26 +23,24 @@ The one-shot API requires a maximum decoded size and rejects trailing bytes
 after the Brotli stream:
 
 ```rust
-let compressed: &[u8] = /* Brotli bytes */;
-let decoded = brutli::decompress(compressed, 16 * 1024 * 1024)?;
-# Ok::<(), brutli::DecodeError>(())
+let compressed = brutli::compress(b"Brotli data");
+let decoded = brutli::decompress(&compressed, 16 * 1024 * 1024)?;
 ```
 
 For incremental decoding, `Decoder` exposes output/window limits and explicit
 `process` / `finish` calls:
 
 ```rust
-use brutli::{DecodeStatus, Decoder};
+use brutli::Decoder;
 
 let mut decoder = Decoder::with_limits(Some(16 * 1024 * 1024), 22);
 let mut output = [0_u8; 8192];
-let progress = decoder.process(compressed, &mut output)?;
-# let _ = (progress, DecodeStatus::NeedInput);
-# Ok::<(), brutli::DecodeError>(())
+let progress = decoder.process(&compressed, &mut output)?;
 ```
 
 `Decoder::with_output_limit` and `Decoder::with_max_window_bits` configure one
-limit at a time. The window limit is checked before history growth.
+limit at a time. The window limit is checked before history growth. Decode
+errors are terminal; create a new decoder for another stream.
 
 `DecoderReader<R>` implements `std::io::Read` for `R: BufRead`. It stops at the
 end of the first Brotli stream and preserves buffered trailing bytes:
@@ -50,11 +48,14 @@ end of the first Brotli stream and preserves buffered trailing bytes:
 ```rust
 use std::io::{Cursor, Read};
 
-let mut reader = brutli::DecoderReader::new(Cursor::new(compressed));
+let decoder = brutli::Decoder::with_output_limit(16 * 1024 * 1024);
+let mut reader = brutli::DecoderReader::with_decoder(Cursor::new(&compressed), decoder);
 let mut decoded = Vec::new();
 reader.read_to_end(&mut decoded)?;
-# Ok::<(), std::io::Error>(())
 ```
+
+`Decoder::new` and `DecoderReader::new` leave decoded output unbounded. Use a
+configured decoder for untrusted input.
 
 ## Encoding
 
@@ -63,7 +64,6 @@ The default one-shot encoder uses quality 5 and `WBITS=22`:
 ```rust
 let compressed = brutli::compress(b"Brotli data");
 let compressed = brutli::compress_with_quality(b"Brotli data", 9)?;
-# Ok::<(), brutli::EncodeError>(())
 ```
 
 `compress_with_options` accepts `EncoderOptions`:
@@ -79,7 +79,6 @@ let compressed = compress_with_options(
         mode: EncoderMode::Generic,
     },
 )?;
-# Ok::<(), brutli::EncodeError>(())
 ```
 
 For streaming, `Encoder` provides `process` and `finish` with the same
